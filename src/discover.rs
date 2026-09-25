@@ -479,7 +479,7 @@ worktree /code/wt-gone\0HEAD 0000000000000000000000000000000000000000\0branch re
     fn finds_the_common_dir_from_any_worktree_folder() {
         let scratch = Scratch::new("common");
         let repo = repo_with_worktrees(&scratch, &["one"]);
-        let common = repo.join(".git").canonicalize().unwrap();
+        let common = canonical(&repo.join(".git")).unwrap();
         assert_eq!(common_dir(&repo).as_deref(), Some(common.as_path()));
         let deep = scratch.0.join("one/some/deep/folder");
         fs::create_dir_all(&deep).unwrap();

@@ -263,7 +263,8 @@ u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.rb\0\
                 std::env::temp_dir().join(format!("grove-test-{name}-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
-            Self(dir.canonicalize().unwrap())
+            // Without the \\?\ prefix Windows adds, which git does not take.
+            Self(crate::discover::canonical(&dir).unwrap())
         }
     }
 

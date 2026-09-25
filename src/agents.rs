@@ -288,7 +288,7 @@ pub fn build(infos: &[Info], claude: &[ClaudeSession], me: u32) -> Scan {
     for pid in &session_pids {
         let info = by_pid[pid];
         let cpu = tree_cpu(*pid, &children, &by_pid, &session_set);
-        let started = Some(UNIX_EPOCH + Duration::from_secs(info.start)).filter(|_| info.start > 0);
+        let started = (info.start > 0).then(|| UNIX_EPOCH + Duration::from_secs(info.start));
         let session = match described.get(pid) {
             Some(file) => {
                 let activity = claude_activity(file.status.as_deref(), file.job.as_ref());
