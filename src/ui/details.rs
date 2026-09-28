@@ -22,36 +22,16 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, r: usize, w: usize) {
     if area.width < 12 || area.height < 3 {
         return;
     }
-    let theme = &app.theme;
     let (repo, worktree) = app.tree(r, w);
     let state = app.state(worktree);
-    let (symbol, color) = state_symbol(app, state);
-    let label = format!(" {symbol} {} ", state_label(app, state));
-    let room = usize::from(area.width).saturating_sub(label.width() + 6);
-    let name = fmt::truncate(worktree_name(repo, worktree), room);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(theme.faint())
-        .title(Line::from(vec![
-            Span::raw(" "),
-            // Its own color: the title would take the faint one of the border.
-            Span::styled(
-                name,
-                Style::new()
-                    .fg(Color::Reset)
-                    .bold()
-                    .remove_modifier(Modifier::DIM),
-            ),
-            Span::raw(" "),
-        ]))
-        .title_top(Line::from(Span::styled(label, Style::new().fg(color))).right_aligned());
-    let inner = block.inner(area);
-    block.render(area, buf);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(2),
-        ..inner
-    };
+    let inner = panel(
+        buf,
+        area,
+        app,
+        worktree_name(repo, worktree),
+        state,
+        state_label(app, state),
+    );
     if inner.is_empty() {
         return;
     }
@@ -88,8 +68,51 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, r: usize, w: usize) {
     }
 }
 
+/// A rounded box titled `name`, with the state at the right of its top edge; returns the
+/// space inside it, one cell in from the sides.
+pub(super) fn panel(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    name: &str,
+    state: State,
+    label: &str,
+) -> Rect {
+    let (symbol, color) = state_symbol(app, state);
+    let label = format!(" {symbol} {label} ");
+    let room = usize::from(area.width).saturating_sub(label.width() + 6);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(app.theme.faint())
+        .title(Line::from(vec![
+            Span::raw(" "),
+            // Its own color: the title would take the faint one of the border.
+            Span::styled(
+                fmt::truncate(name, room),
+                Style::new()
+                    .fg(Color::Reset)
+                    .bold()
+                    .remove_modifier(Modifier::DIM),
+            ),
+            Span::raw(" "),
+        ]))
+        .title_top(Line::from(Span::styled(label, Style::new().fg(color))).right_aligned());
+    let inner = block.inner(area);
+    block.render(area, buf);
+    Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    }
+}
+
 /// Draws `lines` from the top and `bottom` against the bottom edge, when both fit.
-fn column(buf: &mut Buffer, area: Rect, lines: Vec<Line<'static>>, bottom: Vec<Line<'static>>) {
+pub(super) fn column(
+    buf: &mut Buffer,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    bottom: Vec<Line<'static>>,
+) {
     let needed = lines.len() + 1 + bottom.len();
     let height = usize::from(area.height);
     if !bottom.is_empty() && needed <= height {
@@ -104,7 +127,7 @@ fn column(buf: &mut Buffer, area: Rect, lines: Vec<Line<'static>>, bottom: Vec<L
     Paragraph::new(lines).render(area, buf);
 }
 
-fn title(app: &App, text: &str, extra: Option<String>) -> Line<'static> {
+pub(super) fn title(app: &App, text: &str, extra: Option<String>) -> Line<'static> {
     let mut spans = vec![Span::styled(text.to_string(), app.theme.muted().bold())];
     if let Some(extra) = extra {
         spans.push(Span::styled(format!("  {extra}"), app.theme.muted()));
@@ -112,7 +135,7 @@ fn title(app: &App, text: &str, extra: Option<String>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn ago(app: &App, when: SystemTime) -> String {
+pub(super) fn ago(app: &App, when: SystemTime) -> String {
     let seconds = SystemTime::now()
         .duration_since(when)
         .map_or(0, |elapsed| elapsed.as_secs());

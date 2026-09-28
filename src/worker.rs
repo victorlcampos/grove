@@ -1,5 +1,6 @@
-//! Background threads: repository discovery, process scans, disk measurement, git status and
-//! removal. They report back to the interface through one channel.
+//! Background threads: repository discovery, process scans, the conversations agents keep,
+//! disk measurement, git status and removal. They report back to the interface through one
+//! channel.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -15,10 +16,13 @@ use crate::agents::{self, Scanner};
 use crate::discover::Finder;
 use crate::du::{self, Progress, Usage, Volume};
 use crate::git::{self, Force};
-use crate::model::{Repo, Scan};
+use crate::history::History;
+use crate::model::{Conversation, Repo, Scan};
 
 const FIND_EVERY: Duration = Duration::from_secs(10);
 const SCAN_EVERY: Duration = Duration::from_secs(2);
+const HISTORY_EVERY: Duration = Duration::from_secs(5);
+const ANSWER_EVERY: Duration = Duration::from_millis(250);
 const PROGRESS_EVERY: Duration = Duration::from_millis(120);
 /// Removals and status checks run a few at a time: each waits mostly on the disk.
 const REMOVERS: usize = 3;
@@ -29,6 +33,7 @@ pub enum Msg {
     Repos(Vec<Repo>),
     Volume(Option<Volume>),
     Scan(Scan),
+    History(Vec<Conversation>),
     Measuring {
         path: PathBuf,
         bytes: u64,
@@ -75,6 +80,7 @@ pub struct RemoveJob {
 pub struct Workers {
     find: Sender<Find>,
     scan: Sender<()>,
+    history: Sender<()>,
     size: Sender<SizeJob>,
     status: Sender<(PathBuf, bool)>,
     remove: Sender<RemoveJob>,
@@ -84,6 +90,7 @@ impl Workers {
     pub fn start(finder: Finder, home: Option<PathBuf>, tx: Sender<Msg>) -> Self {
         let (find, find_rx) = mpsc::channel();
         let (scan, scan_rx) = mpsc::channel();
+        let (history, history_rx) = mpsc::channel();
         let (size, size_rx) = mpsc::channel();
         let (status, status_rx) = mpsc::channel();
         let (remove, remove_rx) = mpsc::channel();
@@ -99,6 +106,11 @@ impl Workers {
             let tx = tx.clone();
             move || find_loop(finder, &find_rx, &tx)
         });
+        spawn("grove-history", {
+            let tx = tx.clone();
+            let history = History::new(home.as_deref());
+            move || history_loop(history, &history_rx, &tx)
+        });
         spawn("grove-scan", {
             let tx = tx.clone();
             move || scan_loop(home.as_deref(), &scan_rx, &tx)
@@ -111,6 +123,7 @@ impl Workers {
         Self {
             find,
             scan,
+            history,
             size,
             status,
             remove,
@@ -122,12 +135,14 @@ impl Workers {
     pub fn idle() -> Self {
         let (find, _) = mpsc::channel();
         let (scan, _) = mpsc::channel();
+        let (history, _) = mpsc::channel();
         let (size, _) = mpsc::channel();
         let (status, _) = mpsc::channel();
         let (remove, _) = mpsc::channel();
         Self {
             find,
             scan,
+            history,
             size,
             status,
             remove,
@@ -137,6 +152,7 @@ impl Workers {
     pub fn refresh(&self) {
         let _ = self.find.send(Find::Now);
         let _ = self.scan.send(());
+        let _ = self.history.send(());
     }
 
     /// Folders where agents run, so their repositories are listed even without worktrees.
@@ -212,6 +228,32 @@ fn scan_loop(home: Option<&Path>, rx: &Receiver<()>, tx: &Sender<Msg>) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+/// Looks for the conversations agents keep, reporting them when they change.
+fn history_loop(mut history: History, rx: &Receiver<()>, tx: &Sender<Msg>) {
+    let mut sent: Option<Vec<Conversation>> = None;
+    let mut force = true;
+    loop {
+        let found = history.load(force);
+        if sent.as_ref() != Some(&found) {
+            if tx.send(Msg::History(found.clone())).is_err() {
+                return;
+            }
+            sent = Some(found);
+        }
+        // An answer from OpenCode still out is looked for sooner.
+        let wait = if history.waiting() {
+            ANSWER_EVERY
+        } else {
+            HISTORY_EVERY
+        };
+        force = match rx.recv_timeout(wait) {
+            Ok(()) => true,
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
     }
 }
 

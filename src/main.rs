@@ -1,11 +1,13 @@
 mod agents;
 mod app;
+mod clipboard;
 #[cfg(test)]
 mod demo;
 mod discover;
 mod du;
 mod fmt;
 mod git;
+mod history;
 mod i18n;
 mod layout;
 mod model;
@@ -27,7 +29,7 @@ use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
 use ratatui::{DefaultTerminal, Terminal};
 
-use crate::app::App;
+use crate::app::{App, View};
 use crate::discover::Finder;
 use crate::i18n::Lang;
 use crate::theme::Theme;
@@ -35,7 +37,8 @@ use crate::worker::{Msg, Workers};
 
 /// Watches the git worktrees on this computer: which ones a Claude Code, Codex or OpenCode
 /// session is using, how much disk each one takes, and removes them with the right git
-/// command. Fits anything from a full screen to a small tiling pane.
+/// command. Lists the conversations those agents keep too, and copies the command that
+/// resumes one. Fits anything from a full screen to a small tiling pane.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -55,6 +58,10 @@ struct Cli {
     /// Interface language [default: from $LANG]
     #[arg(long, value_enum)]
     lang: Option<Lang>,
+
+    /// Start on the sessions list
+    #[arg(long, hide = true)]
+    sessions: bool,
 
     /// Print one screen of this size (like 120x40) after scanning for a while, and exit
     #[arg(long, value_name = "WxH", value_parser = parse_size, hide = true)]
@@ -110,6 +117,9 @@ fn main() -> ExitCode {
     let workers = Workers::start(finder, home.clone(), tx.clone());
     let lang = cli.lang.unwrap_or_else(Lang::from_env);
     let mut app = App::new(lang, Theme::detect(), home, roots, workers);
+    if cli.sessions {
+        app.view = View::Sessions;
+    }
 
     if let Some((width, height)) = cli.snapshot {
         return snapshot(&mut app, &rx, (width, height), cli.wait, cli.svg.as_deref());

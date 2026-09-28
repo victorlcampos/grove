@@ -69,11 +69,15 @@ pub struct Info {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClaudeSession {
     pub pid: u32,
+    /// The conversation it has open.
+    pub id: Option<String>,
     pub cwd: Option<PathBuf>,
     pub name: Option<String>,
     pub background: bool,
     pub status: Option<String>,
     pub started: Option<SystemTime>,
+    /// The background job's short id, which `claude attach` takes.
+    pub job_id: Option<String>,
     pub job: Option<Job>,
 }
 
@@ -315,6 +319,8 @@ pub fn build(infos: &[Info], claude: &[ClaudeSession], me: u32) -> Scan {
                     cpu,
                     started: file.started.or(started),
                     cwd,
+                    conversation: file.id.clone(),
+                    job: file.job_id.clone(),
                 }
             }
             None => {
@@ -338,6 +344,8 @@ pub fn build(infos: &[Info], claude: &[ClaudeSession], me: u32) -> Scan {
                     cpu,
                     started,
                     cwd,
+                    conversation: None,
+                    job: None,
                 }
             }
         };
@@ -505,8 +513,9 @@ fn read_claude_sessions(claude_dir: &Path) -> Vec<ClaudeSession> {
             continue;
         };
         if let Some(job_id) = job_id {
-            let state = claude_dir.join("jobs").join(job_id).join("state.json");
+            let state = claude_dir.join("jobs").join(&job_id).join("state.json");
             session.job = fs::read(state).ok().and_then(|bytes| parse_job(&bytes));
+            session.job_id = Some(job_id);
         }
         sessions.push(session);
     }
@@ -526,6 +535,7 @@ pub fn parse_session(bytes: &[u8]) -> Option<(ClaudeSession, Option<String>)> {
     });
     let session = ClaudeSession {
         pid,
+        id: text("sessionId").filter(|id| !id.is_empty()),
         cwd: text("cwd").map(PathBuf::from),
         name: text("name").filter(|name| !name.is_empty()),
         background: text("kind").as_deref() == Some("bg"),
@@ -534,6 +544,7 @@ pub fn parse_session(bytes: &[u8]) -> Option<(ClaudeSession, Option<String>)> {
             .get("startedAt")
             .and_then(Value::as_u64)
             .map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
+        job_id: None,
         job: None,
     };
     Some((session, job_id))
@@ -787,6 +798,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session.pid, 4242);
+        assert_eq!(session.id.as_deref(), Some("0f3a9c21"));
         assert_eq!(
             session.cwd.as_deref(),
             Some(Path::new("/code/app/.claude/worktrees/x"))
@@ -912,10 +924,12 @@ mod tests {
         let claude = vec![
             ClaudeSession {
                 pid: 111,
+                id: Some("5f169b81-6647-4721-9980-eb9838ec7876".into()),
                 cwd: Some("/code/app/.claude/worktrees/x".into()),
                 name: Some("bug hunt".into()),
                 background: true,
                 status: Some("idle".into()),
+                job_id: Some("5f169b81".into()),
                 job: Some(Job {
                     state: Some("blocked".into()),
                     tempo: Some("blocked".into()),
@@ -962,6 +976,12 @@ mod tests {
         let blocked = &scan.sessions[0];
         assert_eq!(blocked.detail.as_deref(), Some("reply A or B"));
         assert!(blocked.background);
+        assert_eq!(
+            blocked.conversation.as_deref(),
+            Some("5f169b81-6647-4721-9980-eb9838ec7876")
+        );
+        assert_eq!(blocked.job.as_deref(), Some("5f169b81"));
+        assert_eq!(scan.sessions[2].conversation, None, "codex does not say");
         assert!(
             scan.sessions[2].cpu >= 95.0,
             "codex counts its cargo grandchild"

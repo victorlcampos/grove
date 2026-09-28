@@ -1,5 +1,6 @@
 //! The list of repositories and their worktrees, in three densities.
 
+use std::path::Path;
 use std::time::SystemTime;
 
 use ratatui::buffer::Buffer;
@@ -40,26 +41,20 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App, items: &[Item]) {
         .unwrap_or(0);
     let density = layout::density(area, u16::try_from(longest).unwrap_or(u16::MAX));
     let tree_height: u16 = if density == Density::Cards { 2 } else { 1 };
-    // A blank line between repositories when the pane is tall enough.
-    let spaced = area.height >= 16;
-    let heights: Vec<u16> = items
+    let headings: Vec<bool> = items
         .iter()
-        .enumerate()
-        .map(|(i, item)| match item {
-            Item::Repo(_) if i > 0 && spaced => 2,
-            Item::Repo(_) => 1,
-            Item::Tree(..) => tree_height,
-        })
+        .map(|item| matches!(item, Item::Repo(_)))
         .collect();
+    let heights = heights(&headings, tree_height, area.height);
     app.page = usize::from((area.height / tree_height).max(1));
     let selected = app.selected_index(items);
-    app.offset = scroll(app.offset, selected, &heights, items, area.height);
+    app.offset = scroll(app.offset, selected, &heights, &headings, area.height);
     let scale = scale(app, items);
 
     let mut y = area.y;
     let mut hits = Vec::new();
     for (index, item) in items.iter().enumerate().skip(app.offset) {
-        let height = shown_height(&heights, items, index, app.offset);
+        let height = shown_height(&heights, &headings, index, app.offset);
         if y + height > area.bottom() {
             break;
         }
@@ -96,10 +91,29 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App, items: &[Item]) {
         y += height;
     }
     app.hits = hits;
+    scrollbar(buf, area, app, &heights, app.offset);
+}
 
+/// How tall each row is: `row` for an entry, one line for a heading, with a blank line
+/// above it after the first when the pane is tall enough.
+pub(super) fn heights(headings: &[bool], row: u16, height: u16) -> Vec<u16> {
+    let spaced = height >= 16;
+    headings
+        .iter()
+        .enumerate()
+        .map(|(i, &heading)| match heading {
+            true if i > 0 && spaced => 2,
+            true => 1,
+            false => row,
+        })
+        .collect()
+}
+
+/// A scrollbar at the right edge, when the rows do not fit.
+pub(super) fn scrollbar(buf: &mut Buffer, area: Rect, app: &App, heights: &[u16], offset: usize) {
     let total: u16 = heights.iter().sum();
     if total > area.height {
-        let position: u16 = heights[..app.offset].iter().sum();
+        let position: u16 = heights[..offset].iter().sum();
         let mut state = ScrollbarState::new(usize::from(total - area.height) + 1)
             .position(usize::from(position))
             .viewport_content_length(usize::from(area.height));
@@ -115,21 +129,21 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App, items: &[Item]) {
 }
 
 /// A heading's blank line is left out at the top of the list.
-fn shown_height(heights: &[u16], items: &[Item], index: usize, offset: usize) -> u16 {
-    if index == offset && matches!(items[index], Item::Repo(_)) {
+pub(super) fn shown_height(heights: &[u16], headings: &[bool], index: usize, offset: usize) -> u16 {
+    if index == offset && headings[index] {
         1
     } else {
         heights[index]
     }
 }
 
-/// The first item to show so the selected one is on screen, with its repository heading
-/// when there is room, and no empty space left at the bottom.
-fn scroll(
+/// The first row to show so the selected one is on screen, with its heading when there is
+/// room, and no empty space left at the bottom.
+pub(super) fn scroll(
     offset: usize,
     selected: Option<usize>,
     heights: &[u16],
-    items: &[Item],
+    headings: &[bool],
     height: u16,
 ) -> usize {
     if heights.is_empty() {
@@ -137,13 +151,13 @@ fn scroll(
     }
     let span = |from: usize, to: usize| -> u16 {
         (from..=to)
-            .map(|i| shown_height(heights, items, i, from))
+            .map(|i| shown_height(heights, headings, i, from))
             .sum()
     };
     let mut offset = offset.min(heights.len() - 1);
     if let Some(selected) = selected {
         let top = match selected.checked_sub(1) {
-            Some(above) if matches!(items[above], Item::Repo(_)) => above,
+            Some(above) if headings[above] => above,
             _ => selected,
         };
         offset = offset.min(top);
@@ -175,7 +189,6 @@ fn scale(app: &App, items: &[Item]) -> u64 {
 }
 
 fn heading(buf: &mut Buffer, row: Rect, app: &App, items: &[Item], r: usize, density: Density) {
-    let theme = &app.theme;
     let repo = &app.repos[r];
     let trees: Vec<&Worktree> = items
         .iter()
@@ -193,9 +206,24 @@ fn heading(buf: &mut Buffer, row: Rect, app: &App, items: &[Item], r: usize, den
         Density::Cards => format!("{} · {}", trees.len(), fmt::size(bytes, app.lang)),
         Density::Minimal => fmt::size_short(bytes, app.lang),
     };
+    let path = matches!(density, Density::Table(_)).then(|| repo.command_dir());
+    heading_line(buf, row, app, &repo.name, path, &summary);
+}
+
+/// A group's heading: its name, where it is when `path` is given and there is room, a rule,
+/// and `summary` at the right.
+pub(super) fn heading_line(
+    buf: &mut Buffer,
+    row: Rect,
+    app: &App,
+    name: &str,
+    path: Option<&Path>,
+    summary: &str,
+) {
+    let theme = &app.theme;
     let width = row.width;
     let mut x = row.x + 1;
-    let name = fmt::truncate(&repo.name, usize::from(width.saturating_sub(2)));
+    let name = fmt::truncate(name, usize::from(width.saturating_sub(2)));
     x += put(
         buf,
         x,
@@ -210,8 +238,8 @@ fn heading(buf: &mut Buffer, row: Rect, app: &App, items: &[Item], r: usize, den
     let summary_x = end.saturating_sub(summary_width + 1);
     let with_summary = summary_x >= x + 4;
     let rule_end = if with_summary { summary_x - 1 } else { end };
-    if matches!(density, Density::Table(_)) {
-        let path = fmt::tilde(repo.command_dir(), app.home.as_deref());
+    if let Some(path) = path {
+        let path = fmt::tilde(path, app.home.as_deref());
         let room = rule_end.saturating_sub(x + 2 + 4);
         if room >= 10 {
             x += 2;
@@ -237,19 +265,12 @@ fn heading(buf: &mut Buffer, row: Rect, app: &App, items: &[Item], r: usize, den
         );
     }
     if with_summary {
-        put(
-            buf,
-            summary_x,
-            row.y,
-            summary_width,
-            &summary,
-            theme.muted(),
-        );
+        put(buf, summary_x, row.y, summary_width, summary, theme.muted());
     }
 }
 
 /// The selection mark and the state symbol.
-fn lead(buf: &mut Buffer, x: u16, y: u16, app: &App, state: State, selected: bool) {
+pub(super) fn lead(buf: &mut Buffer, x: u16, y: u16, app: &App, state: State, selected: bool) {
     let (symbol, color) = state_symbol(app, state);
     if selected {
         put(buf, x, y, 1, "▍", Style::new().fg(app.theme.accent));
@@ -666,22 +687,15 @@ mod tests {
 
     #[test]
     fn scrolls_to_the_selection_with_its_heading() {
-        let items = [
-            Item::Repo(0),
-            Item::Tree(0, 0),
-            Item::Tree(0, 1),
-            Item::Repo(1),
-            Item::Tree(1, 0),
-            Item::Tree(1, 1),
-        ];
+        let headings = [true, false, false, true, false, false];
         let heights = [1, 1, 1, 2, 1, 1];
         // Everything fits: no scrolling.
-        assert_eq!(scroll(3, Some(5), &heights, &items, 10), 0);
+        assert_eq!(scroll(3, Some(5), &heights, &headings, 10), 0);
         // Going down shows the heading of the second repository with its first worktree.
-        assert_eq!(scroll(0, Some(4), &heights, &items, 3), 3);
+        assert_eq!(scroll(0, Some(4), &heights, &headings, 3), 3);
         // Going back up to the first worktree brings its heading back.
-        assert_eq!(scroll(3, Some(1), &heights, &items, 3), 0);
+        assert_eq!(scroll(3, Some(1), &heights, &headings, 3), 0);
         // A window too short for heading and worktree keeps the worktree.
-        assert_eq!(scroll(0, Some(4), &heights, &items, 1), 4);
+        assert_eq!(scroll(0, Some(4), &heights, &headings, 1), 4);
     }
 }

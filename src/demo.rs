@@ -1,5 +1,6 @@
 //! A made-up computer for tests and screenshots: three repositories with worktrees in every
-//! state, and Claude Code, Codex and OpenCode sessions in them.
+//! state, Claude Code, Codex and OpenCode sessions in them, and the conversations those agents
+//! keep.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use crate::app::App;
 use crate::du::Volume;
 use crate::git::{Commit, Status};
-use crate::model::{Activity, Agent, Proc, Repo, Running, Scan, Session, Worktree};
+use crate::model::{Activity, Agent, Conversation, Proc, Repo, Running, Scan, Session, Worktree};
 use crate::worker::Msg;
 
 const DAY: u64 = 86_400;
@@ -64,7 +65,14 @@ fn session(
         },
         started: Some(ago(minutes * 60)),
         cwd: PathBuf::from(cwd),
+        conversation: (agent == Agent::Claude).then(|| conversation_id(pid)),
+        job: (agent == Agent::Claude && background).then(|| conversation_id(pid)[..8].to_string()),
     }
+}
+
+/// The id of the conversation the made-up Claude Code session `pid` has open.
+fn conversation_id(pid: u32) -> String {
+    format!("{pid:08x}-4b1e-4c2d-9e7f-8c1d2a3b4c5d")
 }
 
 fn proc(pid: u32, name: &str, cwd: &str) -> Proc {
@@ -297,6 +305,142 @@ pub fn scan() -> Scan {
     }
 }
 
+/// A made-up conversation last active `minutes` ago in `cwd`, which it started in.
+fn conversation(agent: Agent, id: &str, title: &str, cwd: &str, minutes: u64) -> Conversation {
+    let tools_worktree = [TOOLS_DNS, TOOLS_OLD].contains(&cwd);
+    let (project, worktree) = [BOARD, SHOP, TOOLS]
+        .iter()
+        .find_map(|repo| {
+            if cwd == *repo {
+                return Some((*repo, None));
+            }
+            let name = cwd.strip_prefix(&format!("{repo}/.claude/worktrees/"))?;
+            Some((*repo, Some(name.to_string())))
+        })
+        .or_else(|| tools_worktree.then(|| (TOOLS, cwd.rsplit('/').next().map(str::to_string))))
+        .unwrap_or((cwd, None));
+    Conversation {
+        agent,
+        id: id.into(),
+        title: Some(title.into()),
+        first_prompt: None,
+        last_prompt: None,
+        cwd: PathBuf::from(cwd),
+        start: PathBuf::from(cwd),
+        branch: worktree.as_ref().map(|name| format!("worktree-{name}")),
+        created: Some(ago(minutes * 60 + 3 * 3600)),
+        updated: ago(minutes * 60),
+        pr: None,
+        project: PathBuf::from(project),
+        project_name: project.rsplit('/').next().unwrap_or(project).to_string(),
+        worktree,
+        gone: false,
+        stranded: false,
+    }
+}
+
+/// The conversations the made-up agents keep: the ones the sessions above have open, and
+/// older ones, the most recent first.
+pub fn history() -> Vec<Conversation> {
+    let claude = |pid: u32, title: &str, cwd: &str, minutes: u64| {
+        conversation(Agent::Claude, &conversation_id(pid), title, cwd, minutes)
+    };
+    let mut coupons = claude(58380, "coupon rules", &wt(SHOP, "checkout-coupons"), 1);
+    coupons.start = PathBuf::from(SHOP);
+    coupons.last_prompt = Some("should a coupon apply to each item or to the whole order?".into());
+    let mut pipeline = claude(
+        75833,
+        "pipeline optimization",
+        &wt(SHOP, "order-pipeline"),
+        0,
+    );
+    pipeline.pr = Some((123, "https://github.com/acme/shop/pull/123".into()));
+    pipeline.last_prompt = Some("hunt the bugs in PR #123 before it merges".into());
+    let mut archive = claude(
+        54795,
+        "archive column cards",
+        &wt(BOARD, "archive-cards"),
+        0,
+    );
+    archive.start = PathBuf::from(BOARD);
+    let mut clock = claude(59223, "tui clock themes", SHOP, 2);
+    clock.branch = Some("feat/design-system".into());
+    let mut docs = claude(5947, "api docs review", SHOP, 3);
+    docs.branch = Some("feat/design-system".into());
+    let mut dns = conversation(
+        Agent::Codex,
+        "019ebca5-89ff-7983-a0fd-051925b36676",
+        "DNS records for the staging zone",
+        TOOLS_DNS,
+        1,
+    );
+    dns.title = None;
+    dns.first_prompt = Some("add the DNS records for the staging zone to the terraform".into());
+    let mut audit = claude(6126, "dependency audit", SHOP, 40);
+    audit.branch = Some("feat/design-system".into());
+    let mut board = claude(44861, "board-ui", BOARD, 50);
+    board.branch = Some("perf/board-rendering".into());
+    let migrate = conversation(
+        Agent::OpenCode,
+        "ses_f201e4329ffe3PkqigSf6iemRe",
+        "migrate cards to column records",
+        &wt(BOARD, "migrate-cards"),
+        70,
+    );
+    let mut flaky = conversation(
+        Agent::Claude,
+        "a8c1f0d2-5b7e-4f3a-9d6c-2e1b0a9f8e7d",
+        "flaky checkout spec",
+        SHOP,
+        26 * 60,
+    );
+    flaky.branch = Some("feat/design-system".into());
+    flaky.pr = Some((498, "https://github.com/acme/shop/pull/498".into()));
+    flaky.last_prompt = Some("open a PR with the fix and the new spec".into());
+    let mut plan = conversation(
+        Agent::Codex,
+        "019e8e11-2c4d-7aa0-b3f1-6d2c9e4a7b10",
+        "terraform plan for the dns module",
+        TOOLS_DNS,
+        3 * 24 * 60,
+    );
+    plan.title = None;
+    plan.first_prompt = Some("run terraform plan for the dns module and explain the diff".into());
+    let pricing = conversation(
+        Agent::OpenCode,
+        "ses_f2208140bffeF1sLYrI6y9WrlV",
+        "sketch the pricing page",
+        "/Users/me/Workspace/landing",
+        4 * 24 * 60,
+    );
+    let promote = claude(
+        11111,
+        "promote subboards to boards",
+        &wt(BOARD, "promote-subboard"),
+        6 * 24 * 60,
+    );
+    let bench = conversation(
+        Agent::Codex,
+        "019e5a02-77b3-7c21-8e4f-3a9d1c6b2e58",
+        "profile the CLI startup",
+        &wt(SHOP, "bench-cli"),
+        12 * 24 * 60,
+    );
+    let mut old = conversation(
+        Agent::Claude,
+        "3f9e2d1c-0b8a-4765-9c3d-2e1f0a9b8c7d",
+        "try the new DNS provider",
+        TOOLS_OLD,
+        41 * 24 * 60,
+    );
+    old.gone = true;
+    old.stranded = true;
+    vec![
+        pipeline, archive, coupons, dns, clock, docs, audit, board, migrate, flaky, plan, pricing,
+        promote, bench, old,
+    ]
+}
+
 fn status(changed: u32, untracked: u32, ahead: u32, subject: &str, hours: u64) -> Status {
     Status {
         changed,
@@ -318,6 +462,7 @@ fn status(changed: u32, untracked: u32, ahead: u32, subject: &str, hours: u64) -
 /// The made-up computer with every worktree measured and checked.
 pub fn app() -> App {
     let mut app = App::with_data(repos(), scan());
+    app.handle(Msg::History(history()));
     app.home = Some(PathBuf::from("/Users/me"));
     app.volume = Some(Volume {
         free: 312_400_000_000,

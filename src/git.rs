@@ -4,6 +4,8 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::fmt;
+
 /// A git command run in `dir` that never waits for a password and never takes the index lock
 /// from an agent committing in the same worktree.
 pub fn command(dir: &Path) -> Command {
@@ -166,22 +168,13 @@ pub fn remove_command(dir: &str, worktree: &str, force: Force) -> String {
     let mut words = vec![
         "git".to_string(),
         "-C".into(),
-        quote(dir),
+        fmt::shell_word(dir),
         "worktree".into(),
         "remove".into(),
     ];
     words.extend(force.flags().iter().map(|flag| flag.to_string()));
-    words.push(quote(worktree));
+    words.push(fmt::shell_word(worktree));
     words.join(" ")
-}
-
-fn quote(word: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "~/._-+=:,@%".contains(c);
-    if !word.is_empty() && word.chars().all(plain) {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
-    }
 }
 
 /// Removes the worktree with `git worktree remove`, run from the repository's main worktree.

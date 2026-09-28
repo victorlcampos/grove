@@ -186,6 +186,38 @@ impl Columns {
     }
 }
 
+/// Widths of the sessions table columns; zero means the column is left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionColumns {
+    /// The agent's symbol and name, or just the symbol.
+    pub agent: u16,
+    pub title: u16,
+    /// The worktree or branch it worked on.
+    pub place: u16,
+    pub age: u16,
+}
+
+/// The agent's name goes first when the row narrows, then where it worked; the title takes
+/// the rest.
+pub fn session_columns(width: u16) -> SessionColumns {
+    let agent = if width >= 100 { 10 } else { 1 };
+    let age = 5;
+    let fixed = LEAD + agent + 1 + 1 + age + TRAIL;
+    let flex = width.saturating_sub(fixed);
+    let place = if width >= 90 {
+        (flex * 2 / 5).clamp(14, 40)
+    } else {
+        0
+    };
+    let title = if place > 0 { flex - place - 2 } else { flex };
+    SessionColumns {
+        agent,
+        title,
+        place,
+        age,
+    }
+}
+
 /// A box of at most `width`×`height` centered in `area`.
 pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
@@ -269,6 +301,20 @@ mod tests {
                 "{width}: a {branch}-cell branch is unreadable"
             );
         }
+    }
+
+    #[test]
+    fn session_columns_fill_the_row_exactly() {
+        for width in 64..=400 {
+            let c = session_columns(width);
+            let place = if c.place > 0 { 2 + c.place } else { 0 };
+            let total = LEAD + c.agent + 1 + c.title + place + 1 + c.age + TRAIL;
+            assert_eq!(total, width, "{c:?}");
+            assert!(c.title >= 40, "{width}: {c:?}");
+        }
+        assert_eq!(session_columns(80).place, 0);
+        assert_eq!(session_columns(95).agent, 1);
+        assert!(session_columns(160).agent == 10 && session_columns(160).place == 40);
     }
 
     #[test]

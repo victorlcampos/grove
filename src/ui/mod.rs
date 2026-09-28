@@ -3,6 +3,7 @@
 mod details;
 mod dialog;
 mod list;
+mod sessions;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -13,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Item, Mode, State, ToastKind};
+use crate::app::{App, Item, Mode, Row, State, ToastKind, View};
 use crate::fmt;
 use crate::i18n::Keys;
 use crate::layout;
@@ -22,37 +23,64 @@ use crate::theme::{SPINNER, Theme};
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let items = app.items();
+    let rows = app.rows();
     let overlay = matches!(app.mode, Mode::Details);
     let screen = layout::split(area, app.show_details && !overlay);
     app.details_room = layout::split(area, true).details.is_some();
     let buf = frame.buffer_mut();
+    // Where the details go over the list, when the window has no room for them beside it.
+    let body = Rect {
+        y: screen.list.y,
+        height: screen.list.height,
+        ..area
+    };
 
-    if let Some(header_area) = screen.header {
-        header(buf, header_area, app, &items);
-    }
-    if items.is_empty() {
-        app.hits.clear();
-        empty(buf, screen.list, app);
-    } else {
-        list::render(buf, screen.list, app, &items);
-    }
-    let selected = app.selected_tree();
-    if let (Some(panel), Some((r, w))) = (screen.details, selected) {
-        details::render(buf, panel, app, r, w);
-    }
-    if overlay && let Some((r, w)) = selected {
-        let body = Rect {
-            y: screen.list.y,
-            height: screen.list.height,
-            ..area
-        };
-        Clear.render(body, buf);
-        details::render(buf, body, app, r, w);
-    }
-    let mut buttons = match screen.footer {
-        Some(footer_area) => footer(buf, footer_area, app, &items),
+    let tabs = match screen.header {
+        Some(header_area) => header(buf, header_area, app, &items, &rows),
         None => Vec::new(),
     };
+    match app.view {
+        View::Worktrees => {
+            if items.is_empty() {
+                app.hits.clear();
+                empty(buf, screen.list, app);
+            } else {
+                list::render(buf, screen.list, app, &items);
+            }
+            let selected = app.selected_tree();
+            if let (Some(panel), Some((r, w))) = (screen.details, selected) {
+                details::render(buf, panel, app, r, w);
+            }
+            if overlay && let Some((r, w)) = selected {
+                Clear.render(body, buf);
+                details::render(buf, body, app, r, w);
+            }
+        }
+        View::Sessions => {
+            if rows.is_empty() {
+                app.hits.clear();
+                sessions::empty(buf, screen.list, app);
+            } else {
+                sessions::render(buf, screen.list, app, &rows);
+            }
+            let chosen = app.chosen_index(&rows).and_then(|index| match rows[index] {
+                Row::Conversation(i) => Some(i),
+                Row::Project(_) => None,
+            });
+            if let (Some(panel), Some(i)) = (screen.details, chosen) {
+                sessions::details(buf, panel, app, i);
+            }
+            if overlay && let Some(i) = chosen {
+                Clear.render(body, buf);
+                sessions::details(buf, body, app, i);
+            }
+        }
+    }
+    let mut buttons = match screen.footer {
+        Some(footer_area) => footer(buf, footer_area, app, &items, &rows),
+        None => Vec::new(),
+    };
+    buttons.extend(tabs);
     match &app.mode {
         Mode::Help => dialog::help(buf, area, app),
         // Over a dialog, only its own buttons answer.
@@ -168,15 +196,23 @@ fn bar(theme: &Theme, fraction: f64, width: u16, color: Color) -> Vec<Span<'stat
 }
 
 /// A piece of the header: shorter forms come in when the window narrows, and the least
-/// important pieces go first.
+/// important pieces go first. One with a key takes a click, as that key.
 struct Chip<'a> {
     priority: u8,
     full: Vec<Span<'a>>,
     short: Vec<Span<'a>>,
     right: bool,
+    key: Option<KeyCode>,
 }
 
-fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
+/// The header; returns where the tab of the other list is, to click it.
+fn header(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    items: &[Item],
+    rows: &[Row],
+) -> Vec<(Rect, KeyCode)> {
     let text = app.text;
     let theme = &app.theme;
     let totals = app.totals(items);
@@ -198,13 +234,48 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
         full: vec![logo.clone()],
         short: vec![logo],
         right: false,
+        key: None,
     }];
-    if app.found {
+    // A tab per list: the one on screen underlined, the other a click away.
+    let conversations = rows
+        .iter()
+        .filter(|row| matches!(row, Row::Conversation(_)))
+        .count();
+    for (view, key, known, n, full, short) in [
+        (
+            View::Worktrees,
+            KeyCode::Left,
+            app.found,
+            totals.worktrees,
+            &text.worktrees_tab,
+            text.worktrees_tab_short,
+        ),
+        (
+            View::Sessions,
+            KeyCode::Right,
+            app.history_found,
+            conversations,
+            &text.sessions_tab,
+            text.sessions_tab_short,
+        ),
+    ] {
+        let active = app.view == view;
+        let (full, short) = if known {
+            (full.of(n), short.replace("{n}", &n.to_string()))
+        } else {
+            (full.many.replace("{n}", "…"), short.replace("{n}", "…"))
+        };
+        let style = if active {
+            Style::new().bold().underlined()
+        } else {
+            theme.muted()
+        };
         chips.push(Chip {
-            priority: 1,
-            full: vec![Span::raw(format!("{} worktrees", totals.worktrees))],
-            short: vec![Span::raw(format!("{} wt", totals.worktrees))],
+            priority: if active { 1 } else { 5 },
+            full: vec![Span::styled(full, style)],
+            short: vec![Span::styled(short, style)],
             right: false,
+            key: (!active).then_some(key),
         });
     }
     let mut count = |priority, n: usize, symbol: &'static str, color, label: &str| {
@@ -220,6 +291,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
                     Style::new().fg(color).bold(),
                 )],
                 right: false,
+                key: None,
             });
         }
     };
@@ -238,6 +310,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
                 Style::new().bold(),
             )],
             right: false,
+            key: None,
         });
     }
     if let Some(volume) = app.volume.filter(|volume| volume.total > 0) {
@@ -257,6 +330,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
                 theme.muted(),
             )],
             right: false,
+            key: None,
         });
     }
     if !app.removing.is_empty() {
@@ -274,6 +348,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
                 Style::new().fg(theme.error).bold(),
             )],
             right: true,
+            key: None,
         });
     }
     if !app.found {
@@ -285,6 +360,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
             )],
             short: vec![Span::styled(spin, theme.muted())],
             right: true,
+            key: None,
         });
     } else if totals.measuring > 0 {
         let done = totals.worktrees.saturating_sub(totals.measuring);
@@ -296,6 +372,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
             )],
             short: vec![Span::styled(spin, theme.muted())],
             right: true,
+            key: None,
         });
     }
 
@@ -332,6 +409,7 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
     }
     let mut left: Vec<Span> = Vec::new();
     let mut right: Vec<Span> = Vec::new();
+    let mut buttons = Vec::new();
     for (i, chip) in chips.into_iter().enumerate() {
         if !shown[i] {
             continue;
@@ -341,22 +419,47 @@ fn header(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) {
         if !side.is_empty() || chip.right {
             side.push(Span::raw("  "));
         }
+        if let Some(key) = chip.key
+            && !chip.right
+        {
+            let x = area.x + spans_width(side) as u16;
+            let button = Rect::new(x, area.y, spans_width(&spans) as u16, 1).intersection(area);
+            buttons.push((button, key));
+        }
         side.extend(spans);
     }
     put_spans(buf, area.x, area.y, area.width, fit(left, width));
     put_right(buf, area.x, area.y, area.width, right);
+    buttons
 }
 
 /// The key hints, or the filter being typed; returns where the hints are, to click them.
-fn footer(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) -> Vec<(Rect, KeyCode)> {
+fn footer(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    items: &[Item],
+    rows: &[Row],
+) -> Vec<(Rect, KeyCode)> {
     let text = app.text;
     let theme = &app.theme;
     let key_style = Style::new().fg(theme.accent).bold();
     if matches!(app.mode, Mode::Filter) {
-        let matched = items
-            .iter()
-            .filter(|item| matches!(item, Item::Tree(..)))
-            .count();
+        let (matched, total) = match app.view {
+            View::Worktrees => (
+                items
+                    .iter()
+                    .filter(|item| matches!(item, Item::Tree(..)))
+                    .count(),
+                app.listed_worktrees(),
+            ),
+            View::Sessions => (
+                rows.iter()
+                    .filter(|row| matches!(row, Row::Conversation(_)))
+                    .count(),
+                app.history.len(),
+            ),
+        };
         let mut spans = vec![
             Span::styled(" / ", key_style),
             Span::raw(app.filter.clone()),
@@ -366,7 +469,7 @@ fn footer(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) -> Vec<(Rect,
                     "  {}",
                     text.matches
                         .replace("{n}", &matched.to_string())
-                        .replace("{m}", &app.totals(&app.items()).worktrees.to_string())
+                        .replace("{m}", &total.to_string())
                 ),
                 theme.muted(),
             ),
@@ -388,9 +491,11 @@ fn footer(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) -> Vec<(Rect,
         );
         return Vec::new();
     }
-    let keys = match app.mode {
-        Mode::Details => text.details_keys,
-        _ => text.list_keys,
+    let keys = match (app.view, &app.mode) {
+        (View::Worktrees, Mode::Details) => text.details_keys,
+        (View::Worktrees, _) => text.list_keys,
+        (View::Sessions, Mode::Details) => text.session_details_keys,
+        (View::Sessions, _) => text.sessions_keys,
     };
     let mut right: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {
@@ -410,6 +515,8 @@ fn footer(buf: &mut Buffer, area: Rect, app: &App, items: &[Item]) -> Vec<(Rect,
             let code = match key {
                 "⏎" => KeyCode::Enter,
                 "Esc" => KeyCode::Esc,
+                "←" => KeyCode::Left,
+                "→" => KeyCode::Right,
                 key if key.chars().count() == 1 => KeyCode::Char(key.chars().next()?),
                 _ => return None,
             };
@@ -481,6 +588,11 @@ fn empty(buf: &mut Buffer, area: Rect, app: &App) {
         );
         lines
     };
+    centered(buf, area, lines);
+}
+
+/// Draws `lines` centered in `area`, both ways.
+fn centered(buf: &mut Buffer, area: Rect, lines: Vec<Line<'_>>) {
     let top = area.y + area.height.saturating_sub(lines.len() as u16) / 2;
     for (i, line) in lines.into_iter().enumerate() {
         let y = top + i as u16;
@@ -572,34 +684,98 @@ pub(crate) mod tests {
 
     #[test]
     fn draws_at_every_size_without_panicking() {
-        let mut app = demo::app();
-        for width in (0..=220).step_by(3) {
-            for height in (0..=70).step_by(2) {
-                draw(&mut app, width, height);
-            }
-        }
-        for mode in 0..4 {
+        for view in [View::Worktrees, View::Sessions] {
             let mut app = demo::app();
-            app.move_by(2);
-            app.mode = match mode {
-                0 => Mode::Help,
-                1 => Mode::Details,
-                2 => Mode::Filter,
-                _ => Mode::Confirm(crate::app::Confirm {
-                    targets: app.idle_worktrees(),
-                    idle: true,
-                }),
-            };
-            app.toast(
-                ToastKind::Ok,
-                "checkout-coupons removed · 1.9 GB freed".into(),
-            );
-            for width in (0..=160).step_by(7) {
-                for height in (0..=50).step_by(5) {
+            app.view = view;
+            for width in (0..=220).step_by(3) {
+                for height in (0..=70).step_by(2) {
                     draw(&mut app, width, height);
                 }
             }
+            for mode in 0..4 {
+                let mut app = demo::app();
+                app.view = view;
+                app.move_by(2);
+                app.mode = match mode {
+                    0 => Mode::Help,
+                    1 => Mode::Details,
+                    2 => Mode::Filter,
+                    _ => Mode::Confirm(crate::app::Confirm {
+                        targets: app.idle_worktrees(),
+                        idle: true,
+                    }),
+                };
+                app.toast(
+                    ToastKind::Ok,
+                    "checkout-coupons removed · 1.9 GB freed".into(),
+                );
+                for width in (0..=160).step_by(7) {
+                    for height in (0..=50).step_by(5) {
+                        draw(&mut app, width, height);
+                    }
+                }
+            }
         }
+        // Before the first look, and with nothing found.
+        let mut app = demo::app();
+        app.view = View::Sessions;
+        app.history_found = false;
+        app.history.clear();
+        assert!(text(&draw(&mut app, 80, 24)).contains("Looking for sessions"));
+        app.history_found = true;
+        assert!(text(&draw(&mut app, 80, 24)).contains("No sessions found"));
+    }
+
+    #[test]
+    fn the_sessions_list_shows_what_each_conversation_was_and_its_command() {
+        let mut app = demo::app();
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(KeyCode::Right));
+        app.chosen = app
+            .history
+            .iter()
+            .find(|c| c.title.as_deref() == Some("flaky checkout spec"))
+            .map(|c| (c.agent, c.id.clone()));
+        let screen = text(&draw(&mut app, 200, 45));
+        for expected in [
+            "15 worktrees",
+            "15 sessions",
+            "shop  ~/Workspace/shop",
+            "7 sessions",
+            "✻ claude",
+            "❯ codex",
+            "◈ opencode",
+            "coupon rules · reply A or B",
+            "checkout-coupons",
+            "⎇ feat/design-system",
+            "PR #498",
+            "LAST PROMPT",
+            "open a PR with the fix and the new spec",
+            "$ cd ~/Workspace/shop && claude --resume",
+            "a8c1f0d2-5b7e-4f3a-9d6c-2e1b0a9f8e7d",
+            "⏎ copies the command: paste it in a terminal",
+            "⏎ copy command",
+            "i details",
+            "← worktrees",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "missing {expected:?} in\n{screen}"
+            );
+        }
+        // The tab of the other list takes a click, like the key hint.
+        let tabs: Vec<Rect> = app
+            .buttons
+            .iter()
+            .filter(|(_, key)| *key == KeyCode::Left)
+            .map(|(rect, _)| *rect)
+            .collect();
+        let header = screen.lines().next().unwrap();
+        let x = header.find("15 worktrees").unwrap();
+        assert!(
+            tabs.contains(&Rect::new(header[..x].width() as u16, 0, 12, 1)),
+            "{tabs:?}"
+        );
+        assert_eq!(tabs.len(), 2, "{tabs:?}");
     }
 
     #[test]

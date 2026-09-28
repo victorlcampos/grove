@@ -118,6 +118,16 @@ pub fn tilde(path: &Path, home: Option<&Path>) -> String {
     path.display().to_string()
 }
 
+/// A word as a shell takes it: as it is when plain, else in single quotes.
+pub fn shell_word(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "~/._-+=:,@%".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
 /// Cuts the text to `width` cells, ending with "…" when something was cut.
 pub fn truncate(text: &str, width: usize) -> String {
     if text.width() <= width {

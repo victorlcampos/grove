@@ -3,11 +3,13 @@
 A terminal dashboard of your git worktrees: which ones a Claude Code, Codex or
 OpenCode session is working in, how much disk each one takes, and a key to
 remove the ones you are done with, or all the idle ones at once, with
-`git worktree remove`. Built for tiling window managers: resize the pane and
-the layout follows.
+`git worktree remove`. A second list, a `→` away, has every conversation
+those agents keep, the ones `claude --resume` offers and Codex's and
+OpenCode's too, and copies the command that picks one up again. Built for
+tiling window managers: resize the pane and the layout follows.
 
 ```text
- grove   15 worktrees  ◆ 2 waiting for you  ⠸ 4 working  ● 3 idle  Σ 27.2 GB  disk █████▌·· 312 GB free
+ grove   15 worktrees  15 sessions  ◆ 2 waiting for you  ⠸ 4 working  ● 3 idle  Σ 27.2 GB  disk █████▌·· 312 GB free
 
  board  ~/Workspace/board ───────────────────────────────────────────────────────────────────── 4 worktrees · 3.2 GB
  ● board main              ✓          ✻ claude  board-ui                                      1.4 GB ████▋·····    1h
@@ -30,14 +32,14 @@ the layout follows.
  ⠸ tools-dns               ✓          ❯ codex  pid 81234 · 38% cpu                           41.0 MB ▏·········   now
  ✗ tools-old-experiment               ✗ folder is gone                                             — ··········   41d
 
- ↑↓ move  ⏎ details  d remove  D remove idle  / filter  s sort: activity  r refresh  ? help  q quit
+ ↑↓ move  ⏎ details  d remove  D remove idle  → sessions  / filter  s sort: activity  r refresh  ? help  q quit
 ```
 
 <details>
 <summary>In a narrow tiling pane, with the details under the list</summary>
 
 ```text
- grove   15 wt  ◆2  ⠸4  ●3  27G  312 GB free
+ grove   15 wt  15 ses  ◆2  ⠸4  ●3  27G
 
  board ────────────────────────── 4 · 3.2 GB ┃
  ● board main                          1.4 GB┃
@@ -71,6 +73,39 @@ the layout follows.
 │ No agent session here                      │
 ╰────────────────────────────────────────────╯
  ↑↓ move  ⏎ details  d remove  D remove idle
+```
+
+</details>
+
+<details>
+<summary>The sessions list (<code>→</code>): <code>Enter</code> copies the command that resumes one</summary>
+
+```text
+ grove   15 worktrees  15 sessions  ◆ 2 waiting for you  ⠸ 4 working  ● 3 idle  Σ 27.2 GB  disk █████▌·· 312 GB free
+
+ shop  ~/Workspace/shop ───────────────────────────────────────────────────────────────────────────────── 7 sessions
+ ⠸ ✻ claude   pipeline optimization · bug hunter scanning PR #123 (3 l…  order-pipeline                           now
+ ◆ ✻ claude   coupon rules · reply A or B: (A) apply the coupon to eac…  checkout-coupons                         now
+ ⠸ ✻ claude   tui clock themes · 50 themes and a live picker; saving d…  ⎇ feat/design-system                     now
+ ◆ ✻ claude   api docs review · send a prompt to start                   ⎇ feat/design-system                     now
+ ● ✻ claude   dependency audit · 3 outdated gems; report ready           ⎇ feat/design-system                     40m
+▍○ ✻ claude   flaky checkout spec                                        ⎇ feat/design-system                      1d
+ ○ ❯ codex    profile the CLI startup                                    bench-cli                                12d
+
+ board  ~/Workspace/board ─────────────────────────────────────────────────────────────────────────────── 4 sessions
+ ⠸ ✻ claude   archive column cards · moving the column archive to the …  archive-cards                            now
+ ● ✻ claude   board-ui                                                   ⎇ perf/board-rendering                   50m
+ ● ◈ opencode migrate cards to column records                            migrate-cards                             1h
+ ○ ✻ claude   promote subboards to boards                                promote-subboard                          6d
+
+ tools  ~/Workspace/tools ─────────────────────────────────────────────────────────────────────────────── 3 sessions
+ ⠸ ❯ codex    add the DNS records for the staging zone to the terraform  tools-dns                                now
+ ○ ❯ codex    run terraform plan for the dns module and explain the di…  tools-dns                                 3d
+ ✗ ✻ claude   try the new DNS provider                                   tools-old-experiment                     41d
+
+ landing  ~/Workspace/landing ──────────────────────────────────────────────────────────────────────────── 1 session
+ ○ ◈ opencode sketch the pricing page                                                                              4d
+ ↑↓ move  ⏎ copy command  i details  ← worktrees  / filter  r refresh  ? help  q quit
 ```
 
 </details>
@@ -145,6 +180,15 @@ largest.
   background, while you look. Bars compare them, the details list the
   biggest folders inside, and the header shows the total and the free space
   on the disk.
+- **Every conversation, to pick up again.** `→` goes to the
+  conversations Claude Code, Codex and OpenCode keep on disk, grouped by the
+  repository they worked in, the open ones first and then the most recent:
+  their title (or what was asked in them), the worktree or branch, the pull
+  request they opened, and whether a session has them open now and what it
+  is doing. `Enter` copies the command that picks the selected one up again,
+  to paste in the terminal you want: `cd ~/code/app && claude --resume <id>`,
+  `codex resume <id>` or `opencode --session <id>`, or
+  `claude attach <id>` for a Claude Code background session still running.
 - **Removal in one step.** `d` asks once and removes: it stops whatever runs
   in the worktree (agent sessions, servers, shells), then runs
   `git worktree remove --force`, twice forced for a locked worktree, as git
@@ -184,17 +228,20 @@ grove --no-mouse       # leave the mouse to the terminal, to select text
 | --- | --- |
 | `↑` `↓` or `j` `k` | Move (also the mouse wheel and a click) |
 | `PgUp` `PgDn`, `g` `G` | Page, first, last |
-| `Enter` | Show or hide the details (full screen when the window is small) |
+| `←` `→` or `h` `l` | Go to the worktrees or to the sessions (or click the other one on top) |
+| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one |
+| `i` | Show or hide the details |
 | `d` | Remove the worktree, stopping what runs in it |
 | `D` | Remove every idle worktree on the list |
-| `/` | Filter by name, branch, path or session name |
-| `s` | Sort by activity, size, name or oldest |
+| `/` | Filter by name, branch, path, session name or prompt |
+| `s` | Sort the worktrees by activity, size, name or oldest |
 | `r` | Refresh now and measure the selected worktree again |
 | `R` | Measure every worktree again |
 | `?` | Help |
 | `q` or `Ctrl+C` | Quit |
 
-In a removal question, `Enter` removes and `Esc` cancels.
+In a removal question, `Enter` removes and `Esc` cancels. Among the sessions,
+a click selects one and a second click copies its command.
 
 ### States
 
@@ -206,6 +253,10 @@ In a removal question, `Enter` removes and `Esc` cancels.
 | `◎` | No agent, but some process runs there |
 | `○` | Free: what `D` removes |
 | `✗` | The folder is gone; removing only clears git's record |
+
+Among the sessions, `◆`, `⠸` and `●` say what the session that has the
+conversation open is doing, `○` is a closed one and `✗` one whose folder is
+gone, so its command cannot work.
 
 `±12` counts changed and untracked files, `↑3 ↓1` commits ahead and behind
 the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.
@@ -223,6 +274,20 @@ the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.
   honored). Commands an agent runs count through the shell running them;
   helpers it starts on its own, like MCP servers, stay in the folder the
   session started in and are left out.
+- **Conversations** come from the agents' own records, read again only
+  when they change. Claude Code keeps a transcript per conversation in
+  `~/.claude/projects/<folder>/<id>.jsonl` and writes its title, name and
+  last prompt near the end as it goes, so grove reads just the last 64 kB of
+  each, however long it grew; conversations `claude -p` ran are left out, as
+  `claude --resume` does. Codex keeps `~/.codex/sessions/<date>/rollout-*.jsonl`,
+  which start with a line on the session, and the names given to them in
+  `~/.codex/session_index.jsonl`; its subagents and `codex exec` runs are left
+  out. OpenCode keeps a database, which grove asks OpenCode itself to query
+  (`opencode db`), at most every 30 seconds and only when it changed. A
+  Claude Code session says which conversation it has open; a Codex or
+  OpenCode one is taken to have the latest of the folder it runs in. The
+  command is copied with the system's tool (`pbcopy`, `wl-copy`, `xclip`,
+  `xsel`, `clip`), or through the terminal (OSC 52) over SSH or without one.
 - **Removing** stops every process working inside the worktree, helpers
   included: it asks them to quit, and kills the ones still there after three
   seconds. Each process is checked again right before, so a number taken by

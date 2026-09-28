@@ -261,6 +261,80 @@ fn common_dir_of_gitfile(file: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Where a folder belongs: the repository holding it, or the folder itself outside one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The repository's main worktree (its git directory when bare), or the folder.
+    pub project: PathBuf,
+    pub name: String,
+    /// The linked worktree the folder is in, by folder name.
+    pub worktree: Option<String>,
+}
+
+/// Finds the repository holding `dir`. A folder that is gone, like a removed worktree,
+/// belongs to the repository around where it was, and counts as a worktree of it.
+pub fn place(dir: &Path) -> Place {
+    let name_of = |dir: &Path| dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    let mut current = Some(dir);
+    while let Some(folder) = current {
+        let here = || canonical(folder).unwrap_or_else(|| folder.to_path_buf());
+        let dot_git = folder.join(".git");
+        let found = match fs::metadata(&dot_git) {
+            Ok(meta) if meta.is_dir() => Some((here(), None)),
+            // A linked worktree, or a submodule, which is a repository of its own.
+            Ok(meta) if meta.is_file() => Some(match main_worktree(&dot_git) {
+                Some(main) => (main, name_of(folder)),
+                None => (here(), None),
+            }),
+            _ if is_bare(folder) => Some((here(), None)),
+            _ => None,
+        };
+        if let Some((project, mut worktree)) = found {
+            if worktree.is_none() && folder != dir && !dir.exists() {
+                worktree = name_of(dir);
+            }
+            return Place {
+                name: folder_name(&project),
+                project,
+                worktree,
+            };
+        }
+        current = folder.parent();
+    }
+    Place {
+        project: dir.to_path_buf(),
+        name: folder_name(dir),
+        worktree: None,
+    }
+}
+
+/// The main worktree of the linked worktree whose `.git` file is `file`: the folder around
+/// the git directory its `commondir` leads to, or that directory when the repository is
+/// bare. `None` for a submodule.
+fn main_worktree(file: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(file).ok()?;
+    let target = text.lines().find_map(|line| line.strip_prefix("gitdir:"))?;
+    let git_dir = file.parent()?.join(target.trim());
+    let common = fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let common = canonical(&git_dir.join(common.trim()))?;
+    match common.file_name() {
+        Some(name) if name == ".git" => common.parent().map(Path::to_path_buf),
+        _ => Some(common),
+    }
+}
+
+/// A folder's name, without the `.git` of a bare repository.
+fn folder_name(dir: &Path) -> String {
+    let name = dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    match name.strip_suffix(".git") {
+        Some(stem) if !stem.is_empty() => stem.to_string(),
+        _ => name,
+    }
+}
+
 fn is_bare(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
 }
@@ -319,14 +393,7 @@ fn repo_name(common: &Path, worktrees: &[Worktree]) -> String {
         .iter()
         .find(|w| w.main)
         .map_or(common, |w| w.path.as_path());
-    let name = dir.file_name().map_or_else(
-        || dir.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    match name.strip_suffix(".git") {
-        Some(stem) if !stem.is_empty() => stem.to_string(),
-        _ => name,
-    }
+    folder_name(dir)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -535,6 +602,33 @@ worktree /code/wt-gone\0HEAD 0000000000000000000000000000000000000000\0branch re
         assert_eq!(names(finder.find(&[])), ["repo"]);
         let agent = scratch.0.join("agent");
         assert_eq!(names(finder.find(&[agent])), ["agent", "repo"]);
+    }
+
+    #[test]
+    fn places_folders_in_their_repository_and_worktree() {
+        let scratch = Scratch::new("place");
+        let repo = repo_with_worktrees(&scratch, &["feature"]);
+        let at = |dir: &Path| {
+            let place = place(dir);
+            (place.project, place.name, place.worktree)
+        };
+        assert_eq!(at(&repo), (repo.clone(), "repo".into(), None));
+        let deep = repo.join("src/app");
+        fs::create_dir_all(&deep).unwrap();
+        assert_eq!(at(&deep), (repo.clone(), "repo".into(), None));
+        assert_eq!(
+            at(&scratch.0.join("feature")),
+            (repo.clone(), "repo".into(), Some("feature".into()))
+        );
+        // A worktree inside the repository, removed since: it still belongs there.
+        let inside = repo.join(".claude/worktrees/gone");
+        assert_eq!(
+            at(&inside),
+            (repo.clone(), "repo".into(), Some("gone".into()))
+        );
+        let plain = scratch.0.join("notes");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(at(&plain), (plain.clone(), "notes".into(), None));
     }
 
     #[test]

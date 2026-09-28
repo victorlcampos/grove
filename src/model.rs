@@ -45,6 +45,51 @@ pub struct Session {
     pub cpu: f32,
     pub started: Option<SystemTime>,
     pub cwd: PathBuf,
+    /// The id of the conversation it has open, when the agent says (Claude Code does).
+    pub conversation: Option<String>,
+    /// The short id `claude attach` takes, for a Claude Code background session.
+    pub job: Option<String>,
+}
+
+/// A conversation an agent keeps on disk and can pick up again: what `claude --resume`,
+/// `codex resume` and `opencode --session` open.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversation {
+    pub agent: Agent,
+    /// The id the agent resumes it by.
+    pub id: String,
+    /// The name it was given, or the one the agent made up for it.
+    pub title: Option<String>,
+    pub first_prompt: Option<String>,
+    pub last_prompt: Option<String>,
+    /// Where it worked last.
+    pub cwd: PathBuf,
+    /// Where the agent resumes it from: the folder it started in.
+    pub start: PathBuf,
+    pub branch: Option<String>,
+    pub created: Option<SystemTime>,
+    pub updated: SystemTime,
+    /// The pull request it opened: number and address.
+    pub pr: Option<(u64, String)>,
+    /// The repository it worked in, or its folder when it is not in one.
+    pub project: PathBuf,
+    pub project_name: String,
+    /// The linked worktree it worked in, by folder name.
+    pub worktree: Option<String>,
+    /// Set when the folder it worked in is gone, like a worktree since removed.
+    pub gone: bool,
+    /// Set when the folder it resumes from is gone: its command cannot work.
+    pub stranded: bool,
+}
+
+impl Conversation {
+    /// What the list shows it by: its title, else what was asked in it.
+    pub fn label(&self) -> Option<&str> {
+        self.title
+            .as_deref()
+            .or(self.last_prompt.as_deref())
+            .or(self.first_prompt.as_deref())
+    }
 }
 
 /// A process that is not an agent session but has its working directory in some folder.

@@ -59,6 +59,8 @@ pub fn svg(buf: &Buffer) -> String {
             }
             if cell.modifier.contains(Modifier::CROSSED_OUT) {
                 attributes.push_str(r#" text-decoration="line-through""#);
+            } else if cell.modifier.contains(Modifier::UNDERLINED) {
+                attributes.push_str(r#" text-decoration="underline""#);
             }
             let symbol = symbol
                 .replace('&', "&amp;")
@@ -147,7 +149,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::app::{Confirm, Mode, ToastKind};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+    use crate::app::{Confirm, Mode, ToastKind, View};
     use crate::demo;
     use crate::ui::tests::draw;
 
@@ -166,8 +170,11 @@ mod tests {
     fn pictures() {
         let dir = PathBuf::from(std::env::var("GROVE_PICTURES").expect("set GROVE_PICTURES"));
         std::fs::create_dir_all(&dir).unwrap();
-        let shots: [(&str, u16, u16, u8); 14] = [
+        let shots: [(&str, u16, u16, u8); 17] = [
             ("readme-list", 118, 27, 4),
+            ("readme-sessions", 118, 25, 7),
+            ("sessions-wide", 200, 44, 8),
+            ("sessions-pane", 46, 34, 9),
             ("readme-pane", 46, 34, 0),
             ("readme-confirm", 96, 24, 5),
             ("readme-idle", 96, 30, 2),
@@ -216,6 +223,14 @@ mod tests {
                         targets: vec![app.selected.clone().unwrap()],
                         idle: false,
                     });
+                }
+                7..=9 => {
+                    app.view = View::Sessions;
+                    app.show_details = scene != 7;
+                    app.move_by(5);
+                    if scene == 8 {
+                        app.on_key(KeyEvent::from(KeyCode::Enter));
+                    }
                 }
                 _ => {}
             }

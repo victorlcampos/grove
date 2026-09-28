@@ -13,11 +13,13 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 
 use crate::agents::{self, Usage as Presence};
+use crate::clipboard::Clipboard;
 use crate::du::{Usage, Volume};
 use crate::fmt;
 use crate::git::{Force, Status};
+use crate::history;
 use crate::i18n::{Lang, Text};
-use crate::model::{Activity, Repo, Scan, Worktree, worktree_name};
+use crate::model::{Activity, Agent, Conversation, Repo, Scan, Session, Worktree, worktree_name};
 use crate::theme::Theme;
 use crate::worker::{Msg, RemoveJob, SizeJob, Workers};
 
@@ -31,6 +33,17 @@ const TOAST_TTL: Duration = Duration::from_secs(6);
 /// A removed worktree stays hidden this long, in case a listing made before the removal
 /// arrives after it.
 const GONE_TTL: Duration = Duration::from_secs(30);
+/// A Codex or OpenCode session has the latest conversation of its folder open when that was
+/// written since the session started, give or take this much.
+const START_SLACK: Duration = Duration::from_secs(2);
+
+/// Which list is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Worktrees,
+    /// The conversations agents keep, to pick one up again.
+    Sessions,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sort {
@@ -145,6 +158,14 @@ pub enum Item {
     Tree(usize, usize),
 }
 
+/// A row of the sessions list: a project heading or one of its conversations, each by the
+/// index of a conversation in `App::history` (the project's first one, for a heading).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Project(usize),
+    Conversation(usize),
+}
+
 /// Counts for the header.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Totals {
@@ -193,8 +214,23 @@ pub struct App {
     /// stands for.
     pub buttons: Vec<(Rect, KeyCode)>,
     pub batch: Option<Batch>,
+    pub view: View,
+    /// The conversations agents keep, the most recent first.
+    pub history: Vec<Conversation>,
+    /// Whether the first look for conversations finished.
+    pub history_found: bool,
+    /// The selected conversation, by agent and id, so it stays selected as the list changes.
+    pub chosen: Option<(Agent, String)>,
+    /// First row of the sessions list on screen.
+    pub history_offset: usize,
+    pub clipboard: Clipboard,
     started: Instant,
     last_index: usize,
+    history_index: usize,
+    /// Whether each conversation is the latest of its agent in its folder: the one an agent
+    /// that does not say which it has open (Codex, OpenCode) is taken to have when it runs
+    /// there.
+    newest: Vec<bool>,
     gone: HashMap<PathBuf, Instant>,
     looked_in: Vec<PathBuf>,
     workers: Workers,
@@ -236,8 +272,16 @@ impl App {
             details_room: true,
             buttons: Vec::new(),
             batch: None,
+            view: View::Worktrees,
+            history: Vec::new(),
+            history_found: false,
+            chosen: None,
+            history_offset: 0,
+            clipboard: Clipboard::System,
             started: Instant::now(),
             last_index: 0,
+            history_index: 0,
+            newest: Vec::new(),
             gone: HashMap::new(),
             looked_in: Vec::new(),
             workers,
@@ -250,6 +294,7 @@ impl App {
             Msg::Repos(repos) => self.on_repos(repos),
             Msg::Volume(volume) => self.volume = volume,
             Msg::Scan(scan) => self.on_scan(scan),
+            Msg::History(history) => self.on_history(history),
             Msg::Measuring { path, bytes, files } => {
                 if let Some(size) = self.sizes.get_mut(&path) {
                     size.queued = false;
@@ -288,6 +333,7 @@ impl App {
     /// Whether something on screen moves, so the screen redraws often.
     pub fn animating(&self) -> bool {
         !self.found
+            || (self.view == View::Sessions && !self.history_found)
             || !self.toasts.is_empty()
             || !self.removing.is_empty()
             || self.sizes.values().any(SizeState::busy)
@@ -318,6 +364,17 @@ impl App {
             self.looked_in = folders.clone();
             self.workers.look_in(folders);
         }
+        self.keep_selection();
+    }
+
+    fn on_history(&mut self, history: Vec<Conversation>) {
+        let mut seen = HashSet::new();
+        self.newest = history
+            .iter()
+            .map(|conversation| seen.insert((conversation.agent, conversation.cwd.clone())))
+            .collect();
+        self.history = history;
+        self.history_found = true;
         self.keep_selection();
     }
 
@@ -369,6 +426,15 @@ impl App {
             State::Working | State::Blocked => Some(SystemTime::now()),
             _ => worktree.touched,
         }
+    }
+
+    /// How many worktrees the list has without a filter.
+    pub fn listed_worktrees(&self) -> usize {
+        self.repos
+            .iter()
+            .filter(|repo| self.repo_visible(repo))
+            .map(|repo| repo.worktrees.len())
+            .sum()
     }
 
     fn repo_visible(&self, repo: &Repo) -> bool {
@@ -493,42 +559,185 @@ impl App {
         }
     }
 
-    /// Keeps the selection on a worktree still listed, or the one now where it was.
+    /// The agent session that has the conversation open now. Claude Code says which one each
+    /// session has; a Codex or OpenCode session has the latest conversation of its folder,
+    /// once it wrote to it.
+    pub fn live(&self, i: usize) -> Option<&Session> {
+        let conversation = &self.history[i];
+        let mut sessions = self
+            .scan
+            .sessions
+            .iter()
+            .filter(|session| session.agent == conversation.agent);
+        if conversation.agent == Agent::Claude {
+            return sessions
+                .find(|session| session.conversation.as_ref() == Some(&conversation.id));
+        }
+        if !self.newest.get(i).copied().unwrap_or(false) {
+            return None;
+        }
+        sessions.find(|session| {
+            session.cwd == conversation.cwd
+                && session
+                    .started
+                    .is_none_or(|started| started <= conversation.updated + START_SLACK)
+        })
+    }
+
+    /// What a conversation shows at a glance: what the session that has it open is doing,
+    /// else `Free` (closed), or `Missing` when the folder it resumes from is gone.
+    pub fn conversation_state(&self, i: usize) -> State {
+        match self.live(i).map(|session| session.activity) {
+            Some(Activity::Blocked) => State::Blocked,
+            Some(Activity::Working) => State::Working,
+            Some(Activity::Idle) => State::Idle,
+            None if self.history[i].stranded => State::Missing,
+            None => State::Free,
+        }
+    }
+
+    fn shows(&self, conversation: &Conversation) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        let needle = self.filter.to_lowercase();
+        let found = |text: &str| text.to_lowercase().contains(&needle);
+        [
+            conversation.title.as_deref(),
+            conversation.first_prompt.as_deref(),
+            conversation.last_prompt.as_deref(),
+            conversation.branch.as_deref(),
+            conversation.worktree.as_deref(),
+            Some(conversation.project_name.as_str()),
+            Some(conversation.agent.name()),
+            Some(conversation.id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(found)
+            || found(&conversation.cwd.to_string_lossy())
+    }
+
+    /// The sessions list: the projects, the one with the latest conversation first, each
+    /// followed by its conversations, the open ones first and then the most recent.
+    pub fn rows(&self) -> Vec<Row> {
+        let mut order: Vec<usize> = (0..self.history.len())
+            .filter(|&i| self.shows(&self.history[i]))
+            .collect();
+        // The history is the most recent first; a stable sort keeps that among equals.
+        order.sort_by_cached_key(|&i| self.live(i).is_none());
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut group_of: HashMap<&PathBuf, usize> = HashMap::new();
+        for i in order {
+            let group = *group_of.entry(&self.history[i].project).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[group].push(i);
+        }
+        let mut rows = Vec::new();
+        for group in groups {
+            rows.push(Row::Project(group[0]));
+            rows.extend(group.into_iter().map(Row::Conversation));
+        }
+        rows
+    }
+
+    pub fn chosen_index(&self, rows: &[Row]) -> Option<usize> {
+        let (agent, id) = self.chosen.as_ref()?;
+        rows.iter().position(|row| match *row {
+            Row::Conversation(i) => self.history[i].agent == *agent && self.history[i].id == *id,
+            Row::Project(_) => false,
+        })
+    }
+
+    /// The selected conversation, when it is on the list.
+    pub fn chosen_conversation(&self) -> Option<usize> {
+        let rows = self.rows();
+        match rows.get(self.chosen_index(&rows)?) {
+            Some(Row::Conversation(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    fn choose(&mut self, rows: &[Row], index: usize) {
+        if let Some(Row::Conversation(i)) = rows.get(index) {
+            let conversation = &self.history[*i];
+            self.chosen = Some((conversation.agent, conversation.id.clone()));
+            self.history_index = index;
+        }
+    }
+
+    /// Keeps each list's selection on a row still listed, or the one now where it was.
     pub fn keep_selection(&mut self) {
         let items = self.items();
-        if let Some(index) = self.selected_index(&items) {
-            self.last_index = index;
-            return;
-        }
-        let trees: Vec<usize> = (0..items.len())
-            .filter(|&i| matches!(items[i], Item::Tree(..)))
-            .collect();
-        match trees
-            .iter()
-            .find(|&&i| i >= self.last_index)
-            .or(trees.last())
-        {
-            Some(&index) => self.select(&items, index),
+        let trees = selectable(&items, |item| matches!(item, Item::Tree(..)));
+        match settle(self.selected_index(&items), &trees, self.last_index) {
+            Some(index) => self.select(&items, index),
             None => self.selected = None,
+        }
+        let rows = self.rows();
+        let conversations = selectable(&rows, |row| matches!(row, Row::Conversation(_)));
+        match settle(self.chosen_index(&rows), &conversations, self.history_index) {
+            Some(index) => self.choose(&rows, index),
+            None => self.chosen = None,
         }
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        let items = self.items();
-        let trees: Vec<usize> = (0..items.len())
-            .filter(|&i| matches!(items[i], Item::Tree(..)))
-            .collect();
-        if trees.is_empty() {
-            return;
+        match self.view {
+            View::Worktrees => {
+                let items = self.items();
+                let trees = selectable(&items, |item| matches!(item, Item::Tree(..)));
+                if let Some(index) = step(self.selected_index(&items), &trees, delta) {
+                    self.select(&items, index);
+                }
+            }
+            View::Sessions => {
+                let rows = self.rows();
+                let conversations = selectable(&rows, |row| matches!(row, Row::Conversation(_)));
+                if let Some(index) = step(self.chosen_index(&rows), &conversations, delta) {
+                    self.choose(&rows, index);
+                }
+            }
         }
-        let current = self
-            .selected_index(&items)
-            .and_then(|index| trees.iter().position(|&t| t == index))
-            .unwrap_or(0);
-        let next = (current as isize)
-            .saturating_add(delta)
-            .clamp(0, trees.len() as isize - 1);
-        self.select(&items, trees[next as usize]);
+    }
+
+    /// Copies the command that picks the selected conversation up again, to paste in a
+    /// terminal.
+    fn copy_command(&mut self) {
+        let Some(i) = self.chosen_conversation() else {
+            return;
+        };
+        let live = self.live(i);
+        let conversation = &self.history[i];
+        let command = history::command(conversation, live, self.home.as_deref());
+        let note = match live {
+            // Attaching to a background session opens that one, not a copy.
+            Some(session) if session.background && session.job.is_some() => None,
+            Some(session) => Some(
+                self.text
+                    .open_elsewhere
+                    .replace("{pid}", &session.pid.to_string()),
+            ),
+            None if conversation.stranded => Some(self.text.folder_gone.to_string()),
+            None => None,
+        };
+        match self.clipboard.copy(&command) {
+            Ok(()) => {
+                self.toast(
+                    ToastKind::Ok,
+                    self.text.copied.replace("{command}", &command),
+                );
+                if let Some(note) = note {
+                    self.toast(ToastKind::Info, note);
+                }
+            }
+            Err(error) => {
+                let text = format!("{}: {error}", self.text.copy_failed);
+                self.toast(ToastKind::Error, text);
+            }
+        }
     }
 
     fn on_event(&mut self, event: Event) {
@@ -555,6 +764,7 @@ impl App {
 
     fn on_list_key(&mut self, key: KeyEvent) {
         let page = self.page.max(1) as isize;
+        let worktrees = self.view == View::Worktrees;
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => self.filter.clear(),
@@ -564,15 +774,19 @@ impl App {
             KeyCode::PageDown => self.move_by(page),
             KeyCode::Home | KeyCode::Char('g') => self.move_by(isize::MIN),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.toggle_details(),
-            KeyCode::Char('d') | KeyCode::Delete => self.ask_removal(),
-            KeyCode::Char('D') => self.ask_idle_removal(),
+            // The lists sit side by side, like their tabs on top.
+            KeyCode::Left | KeyCode::Char('h') => self.view = View::Worktrees,
+            KeyCode::Right | KeyCode::Char('l') => self.view = View::Sessions,
+            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Enter | KeyCode::Char('i') => self.toggle_details(),
+            KeyCode::Char('d') | KeyCode::Delete if worktrees => self.ask_removal(),
+            KeyCode::Char('D') if worktrees => self.ask_idle_removal(),
             KeyCode::Char('/') => {
                 // A new search, like `/` in less and vim.
                 self.filter.clear();
                 self.mode = Mode::Filter;
             }
-            KeyCode::Char('s') => self.sort = self.sort.next(),
+            KeyCode::Char('s') if worktrees => self.sort = self.sort.next(),
             KeyCode::Char('r') => self.refresh(false),
             KeyCode::Char('R') => self.refresh(true),
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -602,13 +816,15 @@ impl App {
     }
 
     fn on_details_key(&mut self, key: KeyEvent) {
+        let worktrees = self.view == View::Worktrees;
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h' | 'q') => {
+            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h' | 'i' | 'q') => {
                 self.mode = Mode::List;
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
-            KeyCode::Char('d') | KeyCode::Delete => self.ask_removal(),
+            KeyCode::Char('d') | KeyCode::Delete if worktrees => self.ask_removal(),
             _ => {}
         }
     }
@@ -636,9 +852,23 @@ impl App {
             MouseEventKind::ScrollDown => self.move_by(1),
             MouseEventKind::ScrollUp => self.move_by(-1),
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(&(_, index)) = self.hits.iter().find(|(rect, _)| rect.contains(at)) {
-                    let items = self.items();
-                    self.select(&items, index);
+                let Some(&(_, index)) = self.hits.iter().find(|(rect, _)| rect.contains(at)) else {
+                    return;
+                };
+                match self.view {
+                    View::Worktrees => {
+                        let items = self.items();
+                        self.select(&items, index);
+                    }
+                    // A click selects a session; another on it copies its command.
+                    View::Sessions => {
+                        let rows = self.rows();
+                        if self.chosen_index(&rows) == Some(index) {
+                            self.copy_command();
+                        } else {
+                            self.choose(&rows, index);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -646,9 +876,13 @@ impl App {
     }
 
     fn toggle_details(&mut self) {
+        let chosen = match self.view {
+            View::Worktrees => self.selected.is_some(),
+            View::Sessions => self.chosen.is_some(),
+        };
         if self.details_room {
             self.show_details = !self.show_details;
-        } else if self.selected.is_some() {
+        } else if chosen {
             self.mode = Mode::Details;
         }
     }
@@ -922,10 +1156,38 @@ impl App {
     }
 }
 
+/// The indexes of the rows `pick` takes, which the selection moves over.
+fn selectable<T>(rows: &[T], pick: impl Fn(&T) -> bool) -> Vec<usize> {
+    (0..rows.len()).filter(|&i| pick(&rows[i])).collect()
+}
+
+/// Where the selection is once the list changed: on the same row when it is still listed,
+/// else on the first selectable row from where it was, else on the last one.
+fn settle(current: Option<usize>, selectable: &[usize], last: usize) -> Option<usize> {
+    current.or_else(|| {
+        selectable
+            .iter()
+            .find(|&&i| i >= last)
+            .or(selectable.last())
+            .copied()
+    })
+}
+
+/// The selectable row `delta` of them away from the selected one.
+fn step(current: Option<usize>, selectable: &[usize], delta: isize) -> Option<usize> {
+    let last = selectable.len().checked_sub(1)?;
+    let at = current
+        .and_then(|index| selectable.iter().position(|&i| i == index))
+        .unwrap_or(0);
+    let next = (at as isize).saturating_add(delta).clamp(0, last as isize);
+    selectable.get(next as usize).copied()
+}
+
 #[cfg(test)]
 impl App {
     pub fn with_data(repos: Vec<Repo>, scan: Scan) -> Self {
         let mut app = App::new(Lang::En, Theme::rgb(), None, Vec::new(), Workers::idle());
+        app.clipboard = Clipboard::Memory(Vec::new());
         app.handle(Msg::Repos(repos));
         app.handle(Msg::Scan(scan));
         app
@@ -1204,6 +1466,209 @@ mod tests {
         app.on_key(KeyEvent::from(KeyCode::Char('D')));
         assert!(matches!(app.mode, Mode::List));
         assert_eq!(app.toasts[0].kind, ToastKind::Info);
+    }
+
+    fn session_names(app: &App) -> Vec<String> {
+        app.rows()
+            .iter()
+            .map(|row| match *row {
+                Row::Project(i) => format!("# {}", app.history[i].project_name),
+                Row::Conversation(i) => app.history[i].label().unwrap_or("-").to_string(),
+            })
+            .collect()
+    }
+
+    fn conversation(app: &App, label: &str) -> usize {
+        app.history
+            .iter()
+            .position(|c| c.label() == Some(label))
+            .unwrap_or_else(|| panic!("no conversation {label:?}"))
+    }
+
+    const DNS: &str = "add the DNS records for the staging zone to the terraform";
+    const PLAN: &str = "run terraform plan for the dns module and explain the diff";
+
+    #[test]
+    fn arrows_go_between_worktrees_and_sessions() {
+        let mut app = demo::app();
+        let key = |app: &mut App, code| app.on_key(KeyEvent::from(code));
+        assert_eq!(app.view, View::Worktrees);
+        key(&mut app, KeyCode::Left);
+        assert_eq!(app.view, View::Worktrees, "nothing further left");
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.view, View::Sessions);
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.view, View::Sessions, "nor further right");
+        // What removes worktrees does nothing among the sessions.
+        key(&mut app, KeyCode::Char('D'));
+        key(&mut app, KeyCode::Char('d'));
+        assert!(matches!(app.mode, Mode::List));
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.view, View::Worktrees);
+        key(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.view, View::Sessions);
+        key(&mut app, KeyCode::Left);
+        assert_eq!(app.view, View::Worktrees);
+        // Enter still shows the details of a worktree, and `i` too.
+        let shown = app.show_details;
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.show_details, shown);
+        key(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.show_details, !shown);
+    }
+
+    #[test]
+    fn lists_sessions_by_project_the_open_ones_first() {
+        let app = demo::app();
+        assert_eq!(
+            session_names(&app),
+            [
+                "# shop",
+                "pipeline optimization",
+                "coupon rules",
+                "tui clock themes",
+                "api docs review",
+                "dependency audit",
+                "flaky checkout spec",
+                "profile the CLI startup",
+                "# board",
+                "archive column cards",
+                "board-ui",
+                "migrate cards to column records",
+                "promote subboards to boards",
+                "# tools",
+                DNS,
+                PLAN,
+                "try the new DNS provider",
+                "# landing",
+                "sketch the pricing page",
+            ]
+        );
+    }
+
+    #[test]
+    fn tells_which_session_has_a_conversation_open() {
+        let app = demo::app();
+        let state = |label: &str| {
+            let i = conversation(&app, label);
+            (app.conversation_state(i), app.live(i).map(|s| s.pid))
+        };
+        assert_eq!(state("coupon rules"), (State::Blocked, Some(58380)));
+        assert_eq!(state("board-ui"), (State::Idle, Some(44861)));
+        assert_eq!(state("flaky checkout spec"), (State::Free, None));
+        // Codex and OpenCode do not say: they have the latest conversation of their folder.
+        assert_eq!(state(DNS), (State::Working, Some(81234)));
+        assert_eq!(state(PLAN), (State::Free, None));
+        assert_eq!(
+            state("migrate cards to column records"),
+            (State::Idle, Some(70001))
+        );
+        assert_eq!(state("try the new DNS provider"), (State::Missing, None));
+    }
+
+    /// Selects the conversation and presses Enter; returns what was copied.
+    fn copy(app: &mut App, label: &str) -> String {
+        let i = conversation(app, label);
+        app.chosen = Some((app.history[i].agent, app.history[i].id.clone()));
+        app.toasts.clear();
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        app.clipboard.last().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn enter_copies_the_command_that_resumes_a_session() {
+        let mut app = demo::app();
+        app.view = View::Sessions;
+        assert_eq!(
+            copy(&mut app, "flaky checkout spec"),
+            "cd ~/Workspace/shop && claude --resume a8c1f0d2-5b7e-4f3a-9d6c-2e1b0a9f8e7d"
+        );
+        assert_eq!(app.toasts.len(), 1);
+        assert!(
+            app.toasts[0]
+                .text
+                .starts_with("Copied: cd ~/Workspace/shop"),
+            "{}",
+            app.toasts[0].text
+        );
+        assert_eq!(
+            copy(&mut app, "coupon rules"),
+            format!("claude attach {:08x}", 58380),
+            "a background session still running is attached to"
+        );
+        assert_eq!(app.toasts.len(), 1);
+        // One open in a terminal: resuming opens a second copy, and grove says so.
+        assert_eq!(
+            copy(&mut app, "board-ui"),
+            format!(
+                "cd ~/Workspace/board && claude --resume {:08x}-4b1e-4c2d-9e7f-8c1d2a3b4c5d",
+                44861
+            )
+        );
+        assert!(
+            app.toasts[1].text.contains("pid 44861"),
+            "{}",
+            app.toasts[1].text
+        );
+        assert_eq!(
+            copy(&mut app, DNS),
+            "cd ~/Workspace/tools-dns && codex resume 019ebca5-89ff-7983-a0fd-051925b36676"
+        );
+        assert_eq!(
+            copy(&mut app, "sketch the pricing page"),
+            "cd ~/Workspace/landing && opencode --session ses_f2208140bffeF1sLYrI6y9WrlV"
+        );
+        copy(&mut app, "try the new DNS provider");
+        assert_eq!(app.toasts[1].text, "Its folder is gone");
+    }
+
+    #[test]
+    fn a_click_selects_a_session_and_another_copies_it() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        crate::ui::tests::draw(&mut app, 160, 40);
+        let click = |rect: Rect| {
+            Msg::Input(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 4,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        let (rect, index) = app.hits[2];
+        app.handle(click(rect));
+        assert_eq!(app.chosen_index(&app.rows()), Some(index));
+        assert_eq!(app.clipboard.last(), None);
+        app.handle(click(rect));
+        let i = app.chosen_conversation().unwrap();
+        let expected = history::command(&app.history[i], app.live(i), app.home.as_deref());
+        assert_eq!(app.clipboard.last(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn the_filter_finds_sessions_by_prompt_or_agent() {
+        let mut app = demo::app();
+        app.view = View::Sessions;
+        app.filter = "terraform".into();
+        assert_eq!(session_names(&app), ["# tools", DNS, PLAN]);
+        app.filter = "OPENCODE".into();
+        assert_eq!(
+            session_names(&app),
+            [
+                "# board",
+                "migrate cards to column records",
+                "# landing",
+                "sketch the pricing page"
+            ]
+        );
+        app.keep_selection();
+        let i = app.chosen_conversation().unwrap();
+        assert_eq!(
+            app.history[i].agent,
+            Agent::OpenCode,
+            "the selection follows"
+        );
     }
 
     #[test]
