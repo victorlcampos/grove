@@ -138,6 +138,17 @@ pub fn command(routine: &Routine, home: Option<&Path>) -> Option<String> {
     })
 }
 
+/// The link that brings a routine's last run up in Claude Desktop, to answer or approve
+/// there: Desktop takes `claude://code/continue?session=local_<id>`, the ids it gives its
+/// sessions, and turns down any other.
+pub fn desktop_link(routine: &Routine) -> Option<String> {
+    let session = &routine.run.as_ref()?.session;
+    let id = session.strip_prefix("local_")?;
+    let valid =
+        (1..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    valid.then(|| format!("claude://code/continue?session={session}"))
+}
+
 /// The systems whose Desktop folders differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum System {
@@ -475,6 +486,28 @@ mod tests {
         let mut desktop = Desktop::at(vec![dir.0.clone(), dir.0.join("agent")]);
         let ids: Vec<String> = desktop.load().into_iter().map(|r| r.id).collect();
         assert_eq!(ids, ["status", "notices", "weekly-review"]);
+    }
+
+    #[test]
+    fn links_to_the_run_the_way_desktop_takes_it() {
+        let (_dir, mut desktop) = desktop();
+        let routines = desktop.load();
+        assert_eq!(
+            desktop_link(&routines[0]).as_deref(),
+            Some("claude://code/continue?session=local_new")
+        );
+        assert_eq!(desktop_link(&routines[1]), None, "never ran");
+        // Desktop turns down any other id, so grove does not hand one over.
+        let mut odd = routines[0].clone();
+        for session in [
+            "chat_1",
+            "local_",
+            "local_a&b=c",
+            &format!("local_{}", "a".repeat(65)),
+        ] {
+            odd.run.as_mut().unwrap().session = session.to_string();
+            assert_eq!(desktop_link(&odd), None, "{session}");
+        }
     }
 
     #[test]

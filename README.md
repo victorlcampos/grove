@@ -234,9 +234,10 @@ largest.
   failed, whether one did not run when it was due (Desktop runs them only
   while it is open), the schedule in words (`weekdays 17:30`) and when it
   runs next. The header counts the routines waiting for you from every list,
-  and a click on it opens them. `Enter` copies
-  `cd <folder> && claude --resume <id>`, to answer the last run from a
-  terminal.
+  and a click on it opens them. `Enter` opens the last run in Claude Desktop
+  (`claude://code/continue?session=local_<id>`), to answer or approve it
+  there; `c` copies `cd <folder> && claude --resume <id>` instead, for a
+  terminal, and so does `Enter` over SSH.
 - **Removal in one step.** `d` asks once and removes: it stops whatever runs
   in the worktree (agent sessions, servers, shells), then runs
   `git worktree remove --force`, twice forced for a locked worktree, as git
@@ -279,7 +280,8 @@ grove --no-mouse       # leave the mouse to the terminal, to select text
 | `←` `→` or `h` `l` | Go between the worktrees, the sessions and the routines (or click a tab on top) |
 | `1` `2` `3` | Go to the worktrees, the sessions or the routines |
 | `t` | Go to Claude Desktop's routines |
-| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions and routines: copy the command that resumes the selected one, or the routine's last run |
+| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one. Routines: open the last run in Claude Desktop, to answer or approve it |
+| `c` | Routines: copy the command that resumes the last run in a terminal |
 | `i` | Show or hide the details |
 | `d` | Remove the worktree, stopping what runs in it |
 | `D` | Remove every idle worktree on the list |

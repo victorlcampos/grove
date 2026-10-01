@@ -159,6 +159,9 @@ pub struct Text {
     pub never_ran: &'static str,
     pub late_note: &'static str,
     pub routine_copy_hint: &'static str,
+    pub opened: &'static str,
+    pub open_failed: &'static str,
+    pub open_remote: &'static str,
     pub list_keys: Keys,
     pub filter_keys: Keys,
     pub details_keys: Keys,
@@ -302,7 +305,10 @@ const EN: Text = Text {
     asks_title: "IT ASKS",
     never_ran: "It has not run yet",
     late_note: "It did not run at {time}: Claude Desktop runs it when it is open",
-    routine_copy_hint: "⏎ copies the command that resumes the last run",
+    routine_copy_hint: "⏎ opens it in Claude Desktop, to answer or approve · c copies this",
+    opened: "Opened in Claude Desktop: {name}",
+    open_failed: "Could not open Claude Desktop, so the command was copied",
+    open_remote: "over SSH, Desktop would open on the other computer",
     list_keys: &[
         ("↑↓", "move"),
         ("⏎", "details"),
@@ -333,7 +339,8 @@ const EN: Text = Text {
     session_details_keys: &[("Esc", "back"), ("⏎", "copy command")],
     routines_keys: &[
         ("↑↓", "move"),
-        ("⏎", "copy command"),
+        ("⏎", "open in Desktop"),
+        ("c", "copy command"),
         ("i", "details"),
         ("←", "sessions"),
         ("/", "filter"),
@@ -341,7 +348,11 @@ const EN: Text = Text {
         ("?", "help"),
         ("q", "quit"),
     ],
-    routine_details_keys: &[("Esc", "back"), ("⏎", "copy command")],
+    routine_details_keys: &[
+        ("Esc", "back"),
+        ("⏎", "open in Desktop"),
+        ("c", "copy command"),
+    ],
     help_keys: &[
         ("↑ ↓  j k", "move"),
         ("PgUp PgDn", "page"),
@@ -354,7 +365,11 @@ const EN: Text = Text {
         ("t", "the routines Claude Desktop runs on a schedule"),
         (
             "Enter",
-            "worktrees: show or hide the details · sessions and routines: copy the command that resumes it",
+            "worktrees: show or hide the details · sessions: copy the command that resumes it · routines: open the last run in Claude Desktop",
+        ),
+        (
+            "c",
+            "routines: copy the command that resumes the last run in a terminal",
         ),
         ("i", "show or hide the details"),
         (
@@ -510,7 +525,10 @@ const PT: Text = Text {
     asks_title: "ELA PERGUNTA",
     never_ran: "Ainda não rodou",
     late_note: "Não rodou às {time}: o Claude Desktop só roda quando está aberto",
-    routine_copy_hint: "⏎ copia o comando que retoma a última execução",
+    routine_copy_hint: "⏎ abre no Claude Desktop, para responder ou aprovar · c copia isto",
+    opened: "Aberta no Claude Desktop: {name}",
+    open_failed: "Não deu para abrir o Claude Desktop, então copiei o comando",
+    open_remote: "por SSH, o Desktop abriria no outro computador",
     list_keys: &[
         ("↑↓", "mover"),
         ("⏎", "detalhes"),
@@ -541,7 +559,8 @@ const PT: Text = Text {
     session_details_keys: &[("Esc", "voltar"), ("⏎", "copiar comando")],
     routines_keys: &[
         ("↑↓", "mover"),
-        ("⏎", "copiar comando"),
+        ("⏎", "abrir no Desktop"),
+        ("c", "copiar comando"),
         ("i", "detalhes"),
         ("←", "sessões"),
         ("/", "filtrar"),
@@ -549,7 +568,11 @@ const PT: Text = Text {
         ("?", "ajuda"),
         ("q", "sair"),
     ],
-    routine_details_keys: &[("Esc", "voltar"), ("⏎", "copiar comando")],
+    routine_details_keys: &[
+        ("Esc", "voltar"),
+        ("⏎", "abrir no Desktop"),
+        ("c", "copiar comando"),
+    ],
     help_keys: &[
         ("↑ ↓  j k", "mover"),
         ("PgUp PgDn", "página"),
@@ -559,7 +582,11 @@ const PT: Text = Text {
         ("t", "as rotinas que o Claude Desktop roda com agenda"),
         (
             "Enter",
-            "worktrees: mostrar ou esconder os detalhes · sessões e rotinas: copiar o comando que a retoma",
+            "worktrees: mostrar ou esconder os detalhes · sessões: copiar o comando que a retoma · rotinas: abrir a última execução no Claude Desktop",
+        ),
+        (
+            "c",
+            "rotinas: copiar o comando que retoma a última execução num terminal",
         ),
         ("i", "mostrar ou esconder os detalhes"),
         (

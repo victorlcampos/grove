@@ -821,7 +821,7 @@ pub(crate) mod tests {
             "IT ASKS",
             "Publish the notes for v2.4 now, or wait for the last PR to merge?",
             "$ cd ~/Workspace/shop && claude --resume",
-            "⏎ copies the command that resumes the last run",
+            "⏎ opens it in Claude Desktop, to answer or approve",
             "← sessions",
         ] {
             assert!(

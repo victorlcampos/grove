@@ -12,6 +12,7 @@ mod history;
 mod i18n;
 mod layout;
 mod model;
+mod opener;
 mod routines;
 mod snapshot;
 mod theme;

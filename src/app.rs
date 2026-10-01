@@ -23,6 +23,7 @@ use crate::i18n::{Lang, Text};
 use crate::model::{
     Activity, Agent, Conversation, Repo, Routine, Scan, Session, Worktree, worktree_name,
 };
+use crate::opener::{self, Opener};
 use crate::routines;
 use crate::theme::Theme;
 use crate::worker::{Msg, RemoveJob, SizeJob, Workers};
@@ -296,6 +297,7 @@ pub struct App {
     /// First row of the routines list on screen.
     pub routines_offset: usize,
     pub clipboard: Clipboard,
+    pub opener: Opener,
     started: Instant,
     last_index: usize,
     history_index: usize,
@@ -356,6 +358,7 @@ impl App {
             picked: None,
             routines_offset: 0,
             clipboard: Clipboard::System,
+            opener: Opener::System,
             started: Instant::now(),
             last_index: 0,
             history_index: 0,
@@ -939,24 +942,54 @@ impl App {
         }
     }
 
-    /// Copies the command that picks the selected conversation or routine run up again.
-    fn copy_command(&mut self) {
+    /// Picks the selected conversation or routine run up again: copies the command that
+    /// resumes a conversation, and opens a routine's run in Claude Desktop.
+    fn resume(&mut self) {
         match self.view {
-            View::Routines => self.copy_routine_command(),
+            View::Routines => self.open_routine(),
             _ => self.copy_conversation_command(),
         }
     }
 
-    /// Copies the command that resumes the last run of the selected routine.
-    fn copy_routine_command(&mut self) {
+    /// Opens the last run of the selected routine in Claude Desktop, where it is answered or
+    /// approved; when that cannot be (over SSH, say), copies the command that resumes it in a
+    /// terminal instead.
+    fn open_routine(&mut self) {
         let Some(i) = self.picked_routine() else {
             return;
         };
-        let Some(command) = routines::command(&self.routines[i], self.home.as_deref()) else {
-            self.toast(ToastKind::Info, self.text.never_ran.to_string());
+        let routine = &self.routines[i];
+        let name = routine.name.clone();
+        let Some(link) = routines::desktop_link(routine) else {
+            self.copy_routine_command();
             return;
         };
-        self.copy(&command);
+        let opened = if opener::remote() && matches!(self.opener, Opener::System) {
+            Err(self.text.open_remote.to_string())
+        } else {
+            self.opener.open(&link)
+        };
+        match opened {
+            Ok(()) => self.toast(ToastKind::Ok, self.text.opened.replace("{name}", &name)),
+            Err(error) => {
+                if self.copy_routine_command() {
+                    let text = format!("{}: {error}", self.text.open_failed);
+                    self.toast(ToastKind::Info, text);
+                }
+            }
+        }
+    }
+
+    /// Copies the command that resumes the last run of the selected routine.
+    fn copy_routine_command(&mut self) -> bool {
+        let Some(i) = self.picked_routine() else {
+            return false;
+        };
+        let Some(command) = routines::command(&self.routines[i], self.home.as_deref()) else {
+            self.toast(ToastKind::Info, self.text.never_ran.to_string());
+            return false;
+        };
+        self.copy(&command)
     }
 
     fn copy(&mut self, command: &str) -> bool {
@@ -1043,7 +1076,10 @@ impl App {
             KeyCode::Char('1') => self.view = View::Worktrees,
             KeyCode::Char('2') => self.view = View::Sessions,
             KeyCode::Char('3' | 't') => self.view = View::Routines,
-            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Enter if !worktrees => self.resume(),
+            KeyCode::Char('c') if self.view == View::Routines => {
+                self.copy_routine_command();
+            }
             KeyCode::Enter | KeyCode::Char('i') => self.toggle_details(),
             KeyCode::Char('d') | KeyCode::Delete if worktrees => self.ask_removal(),
             KeyCode::Char('D') if worktrees => self.ask_idle_removal(),
@@ -1085,7 +1121,10 @@ impl App {
     fn on_details_key(&mut self, key: KeyEvent) {
         let worktrees = self.view == View::Worktrees;
         match key.code {
-            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Enter if !worktrees => self.resume(),
+            KeyCode::Char('c') if self.view == View::Routines => {
+                self.copy_routine_command();
+            }
             KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h' | 'i' | 'q') => {
                 self.mode = Mode::List;
             }
@@ -1131,7 +1170,7 @@ impl App {
                     View::Sessions => {
                         let rows = self.rows();
                         if self.chosen_index(&rows) == Some(index) {
-                            self.copy_command();
+                            self.resume();
                         } else {
                             self.choose(&rows, index);
                         }
@@ -1139,7 +1178,7 @@ impl App {
                     View::Routines => {
                         let rows = self.routine_rows();
                         if self.picked_index(&rows) == Some(index) {
-                            self.copy_command();
+                            self.resume();
                         } else {
                             self.pick(&rows, index);
                         }
@@ -1464,6 +1503,7 @@ impl App {
     pub fn with_data(repos: Vec<Repo>, scan: Scan) -> Self {
         let mut app = App::new(Lang::En, Theme::rgb(), None, Vec::new(), Workers::idle());
         app.clipboard = Clipboard::Memory(Vec::new());
+        app.opener = Opener::Memory(Vec::new());
         app.handle(Msg::Repos(repos));
         app.handle(Msg::Scan(scan));
         app
@@ -2102,23 +2142,33 @@ mod tests {
     }
 
     #[test]
-    fn enter_copies_the_command_that_resumes_a_routine_run() {
+    fn enter_opens_a_routine_run_in_desktop_and_c_copies_its_command() {
         let mut app = demo::app();
         app.on_key(KeyEvent::from(KeyCode::Char('t')));
         app.on_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(
-            app.clipboard.last(),
-            Some("cd ~/Workspace/shop && claude --resume a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01"),
+            app.opener.last(),
+            Some("claude://code/continue?session=local_a1b2c3d4"),
             "the first one, waiting for you"
         );
-        // One that never ran has nothing to resume.
+        assert_eq!(
+            app.toasts[0].text,
+            "Opened in Claude Desktop: Release notes"
+        );
+        assert_eq!(app.clipboard.last(), None, "nothing copied");
+        app.on_key(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(
+            app.clipboard.last(),
+            Some("cd ~/Workspace/shop && claude --resume a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01")
+        );
+        // One that never ran has nothing to open.
         app.picked = Some(app.routines[routine(&app, "inbox-triage")].key.clone());
         app.toasts.clear();
         app.on_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.toasts[0].text, "It has not run yet");
-        assert!(
-            app.clipboard.last().unwrap().contains("a1b2c3d4"),
-            "nothing new copied"
+        assert_eq!(
+            app.opener.last(),
+            Some("claude://code/continue?session=local_a1b2c3d4")
         );
     }
 
