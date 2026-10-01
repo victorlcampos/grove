@@ -356,6 +356,11 @@ pub fn help(buf: &mut Buffer, area: Rect, app: &App) {
             ("○", theme.free, text.state_free),
             ("✗", theme.missing, text.state_missing),
         ],
+        vec![
+            ("✓", theme.ok, text.due_done),
+            ("!", theme.warn, text.due_late),
+            ("‖", theme.free, text.due_paused),
+        ],
         Agent::ALL
             .iter()
             .map(|agent| (agent_glyph(*agent), theme.agent(*agent), agent.name()))

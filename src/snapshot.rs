@@ -170,9 +170,10 @@ mod tests {
     fn pictures() {
         let dir = PathBuf::from(std::env::var("GROVE_PICTURES").expect("set GROVE_PICTURES"));
         std::fs::create_dir_all(&dir).unwrap();
-        let shots: [(&str, u16, u16, u8); 17] = [
+        let shots: [(&str, u16, u16, u8); 18] = [
             ("readme-list", 118, 27, 4),
             ("readme-sessions", 118, 25, 7),
+            ("readme-routines", 118, 26, 10),
             ("sessions-wide", 200, 44, 8),
             ("sessions-pane", 46, 34, 9),
             ("readme-pane", 46, 34, 0),
@@ -232,6 +233,7 @@ mod tests {
                         app.on_key(KeyEvent::from(KeyCode::Enter));
                     }
                 }
+                10 => app.view = View::Routines,
                 _ => {}
             }
             if name == "wide" {

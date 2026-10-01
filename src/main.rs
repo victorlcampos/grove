@@ -1,6 +1,7 @@
 mod agents;
 mod app;
 mod clipboard;
+mod cron;
 #[cfg(test)]
 mod demo;
 mod discover;
@@ -11,6 +12,7 @@ mod history;
 mod i18n;
 mod layout;
 mod model;
+mod routines;
 mod snapshot;
 mod theme;
 mod ui;
@@ -38,7 +40,8 @@ use crate::worker::{Msg, Workers};
 /// Watches the git worktrees on this computer: which ones a Claude Code, Codex or OpenCode
 /// session is using, how much disk each one takes, and removes them with the right git
 /// command. Lists the conversations those agents keep too, and copies the command that
-/// resumes one. Fits anything from a full screen to a small tiling pane.
+/// resumes one, and the routines Claude Desktop runs on a schedule, with the ones waiting for
+/// you first. Fits anything from a full screen to a small tiling pane.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -62,6 +65,10 @@ struct Cli {
     /// Start on the sessions list
     #[arg(long, hide = true)]
     sessions: bool,
+
+    /// Start on Claude Desktop's routines
+    #[arg(long, hide = true, conflicts_with = "sessions")]
+    routines: bool,
 
     /// Print one screen of this size (like 120x40) after scanning for a while, and exit
     #[arg(long, value_name = "WxH", value_parser = parse_size, hide = true)]
@@ -119,6 +126,9 @@ fn main() -> ExitCode {
     let mut app = App::new(lang, Theme::detect(), home, roots, workers);
     if cli.sessions {
         app.view = View::Sessions;
+    }
+    if cli.routines {
+        app.view = View::Routines;
     }
 
     if let Some((width, height)) = cli.snapshot {

@@ -3,6 +3,7 @@
 mod details;
 mod dialog;
 mod list;
+mod routines;
 mod sessions;
 
 use ratatui::Frame;
@@ -24,6 +25,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let items = app.items();
     let rows = app.rows();
+    let routine_rows = app.routine_rows();
     let overlay = matches!(app.mode, Mode::Details);
     let screen = layout::split(area, app.show_details && !overlay);
     app.details_room = layout::split(area, true).details.is_some();
@@ -36,7 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     };
 
     let tabs = match screen.header {
-        Some(header_area) => header(buf, header_area, app, &items, &rows),
+        Some(header_area) => header(buf, header_area, app, &items, &rows, &routine_rows),
         None => Vec::new(),
     };
     match app.view {
@@ -75,9 +77,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 sessions::details(buf, body, app, i);
             }
         }
+        View::Routines => {
+            if routine_rows.is_empty() {
+                app.hits.clear();
+                routines::empty(buf, screen.list, app);
+            } else {
+                routines::render(buf, screen.list, app, &routine_rows);
+            }
+            let picked = app
+                .picked_index(&routine_rows)
+                .map(|index| routine_rows[index]);
+            if let (Some(panel), Some(i)) = (screen.details, picked) {
+                routines::details(buf, panel, app, i);
+            }
+            if overlay && let Some(i) = picked {
+                Clear.render(body, buf);
+                routines::details(buf, body, app, i);
+            }
+        }
     }
     let mut buttons = match screen.footer {
-        Some(footer_area) => footer(buf, footer_area, app, &items, &rows),
+        Some(footer_area) => footer(buf, footer_area, app, &items, &rows, &routine_rows),
         None => Vec::new(),
     };
     buttons.extend(tabs);
@@ -205,13 +225,14 @@ struct Chip<'a> {
     key: Option<KeyCode>,
 }
 
-/// The header; returns where the tab of the other list is, to click it.
+/// The header; returns where the tabs of the other lists are, to click them.
 fn header(
     buf: &mut Buffer,
     area: Rect,
     app: &App,
     items: &[Item],
     rows: &[Row],
+    routine_rows: &[usize],
 ) -> Vec<(Rect, KeyCode)> {
     let text = app.text;
     let theme = &app.theme;
@@ -236,7 +257,7 @@ fn header(
         right: false,
         key: None,
     }];
-    // A tab per list: the one on screen underlined, the other a click away.
+    // A tab per list: the one on screen underlined, the others a click away.
     let conversations = rows
         .iter()
         .filter(|row| matches!(row, Row::Conversation(_)))
@@ -244,7 +265,7 @@ fn header(
     for (view, key, known, n, full, short) in [
         (
             View::Worktrees,
-            KeyCode::Left,
+            KeyCode::Char('1'),
             app.found,
             totals.worktrees,
             &text.worktrees_tab,
@@ -252,11 +273,19 @@ fn header(
         ),
         (
             View::Sessions,
-            KeyCode::Right,
+            KeyCode::Char('2'),
             app.history_found,
             conversations,
             &text.sessions_tab,
             text.sessions_tab_short,
+        ),
+        (
+            View::Routines,
+            KeyCode::Char('3'),
+            app.routines_found,
+            routine_rows.len(),
+            &text.routines_tab,
+            text.routines_tab_short,
         ),
     ] {
         let active = app.view == view;
@@ -276,6 +305,29 @@ fn header(
             short: vec![Span::styled(short, style)],
             right: false,
             key: (!active).then_some(key),
+        });
+    }
+    // Routines waiting for you show from every list: Desktop is not on screen to tell.
+    let waiting = app.routines_waiting();
+    if waiting > 0 {
+        chips.push(Chip {
+            priority: 2,
+            full: vec![
+                Span::styled(
+                    format!("◆ {waiting}"),
+                    Style::new().fg(theme.blocked).bold(),
+                ),
+                Span::styled(
+                    format!(" {}", text.routines_waiting.of(waiting)),
+                    Style::new().fg(theme.blocked),
+                ),
+            ],
+            short: vec![Span::styled(
+                format!("◆{waiting}r"),
+                Style::new().fg(theme.blocked).bold(),
+            )],
+            right: false,
+            key: Some(KeyCode::Char('3')),
         });
     }
     let mut count = |priority, n: usize, symbol: &'static str, color, label: &str| {
@@ -440,6 +492,7 @@ fn footer(
     app: &App,
     items: &[Item],
     rows: &[Row],
+    routine_rows: &[usize],
 ) -> Vec<(Rect, KeyCode)> {
     let text = app.text;
     let theme = &app.theme;
@@ -459,6 +512,7 @@ fn footer(
                     .count(),
                 app.history.len(),
             ),
+            View::Routines => (routine_rows.len(), app.routines.len()),
         };
         let mut spans = vec![
             Span::styled(" / ", key_style),
@@ -496,6 +550,8 @@ fn footer(
         (View::Worktrees, _) => text.list_keys,
         (View::Sessions, Mode::Details) => text.session_details_keys,
         (View::Sessions, _) => text.sessions_keys,
+        (View::Routines, Mode::Details) => text.routine_details_keys,
+        (View::Routines, _) => text.routines_keys,
     };
     let mut right: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {
@@ -684,7 +740,7 @@ pub(crate) mod tests {
 
     #[test]
     fn draws_at_every_size_without_panicking() {
-        for view in [View::Worktrees, View::Sessions] {
+        for view in [View::Worktrees, View::Sessions, View::Routines] {
             let mut app = demo::app();
             app.view = view;
             for width in (0..=220).step_by(3) {
@@ -724,6 +780,62 @@ pub(crate) mod tests {
         assert!(text(&draw(&mut app, 80, 24)).contains("Looking for sessions"));
         app.history_found = true;
         assert!(text(&draw(&mut app, 80, 24)).contains("No sessions found"));
+        app.view = View::Routines;
+        app.routines_found = false;
+        app.routines.clear();
+        assert!(text(&draw(&mut app, 80, 24)).contains("Looking for routines"));
+        app.routines_found = true;
+        assert!(text(&draw(&mut app, 80, 24)).contains("No routines found"));
+    }
+
+    #[test]
+    fn the_routines_list_shows_what_each_one_asks_and_when_it_runs() {
+        let mut app = demo::app();
+        // Routines waiting for you show from the other lists too, and take a click.
+        let screen = text(&draw(&mut app, 200, 45));
+        assert!(screen.contains("◆ 1 routine waiting"), "{screen}");
+        assert!(
+            app.buttons
+                .iter()
+                .any(|(_, key)| *key == KeyCode::Char('3'))
+        );
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(KeyCode::Char(
+            't',
+        )));
+        let screen = text(&draw(&mut app, 200, 45));
+        for expected in [
+            "7 routines",
+            "◆ Release notes",
+            "✗ dependency-audit",
+            "! Weekly digest",
+            "✓ Standup summary",
+            "○ inbox-triage",
+            "‖ cleanup-branches",
+            "weekdays 09:00",
+            "every day 02:30",
+            "Weekdays 09:00 — drafts the release notes from the merged PRs",
+            "SCHEDULE",
+            "LAST RUN",
+            "IT ASKS",
+            "Publish the notes for v2.4 now, or wait for the last PR to merge?",
+            "$ cd ~/Workspace/shop && claude --resume",
+            "⏎ copies the command that resumes the last run",
+            "← sessions",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "missing {expected:?} in\n{screen}"
+            );
+        }
+        // Without room for the details, a wide list says what each one asks.
+        app.show_details = false;
+        let screen = text(&draw(&mut app, 160, 30));
+        assert!(
+            screen.contains("The github MCP server did not start"),
+            "{screen}"
+        );
+        let narrow = text(&draw(&mut app, 40, 24));
+        assert!(narrow.contains("Release notes"), "{narrow}");
     }
 
     #[test]
@@ -762,20 +874,26 @@ pub(crate) mod tests {
                 "missing {expected:?} in\n{screen}"
             );
         }
-        // The tab of the other list takes a click, like the key hint.
-        let tabs: Vec<Rect> = app
-            .buttons
-            .iter()
-            .filter(|(_, key)| *key == KeyCode::Left)
-            .map(|(rect, _)| *rect)
-            .collect();
+        // The tabs of the other lists take a click, as the keys that go to them.
         let header = screen.lines().next().unwrap();
-        let x = header.find("15 worktrees").unwrap();
-        assert!(
-            tabs.contains(&Rect::new(header[..x].width() as u16, 0, 12, 1)),
-            "{tabs:?}"
-        );
-        assert_eq!(tabs.len(), 2, "{tabs:?}");
+        for (key, label) in [('1', "15 worktrees"), ('3', "7 routines")] {
+            let tabs: Vec<Rect> = app
+                .buttons
+                .iter()
+                .filter(|(_, code)| *code == KeyCode::Char(key))
+                .map(|(rect, _)| *rect)
+                .collect();
+            let x = header.find(label).unwrap();
+            assert!(
+                tabs.contains(&Rect::new(
+                    header[..x].width() as u16,
+                    0,
+                    label.width() as u16,
+                    1
+                )),
+                "{label}: {tabs:?}"
+            );
+        }
     }
 
     #[test]
