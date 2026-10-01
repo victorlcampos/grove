@@ -252,6 +252,8 @@ pub struct Run {
     pub error: Option<String>,
     /// Archived in Desktop: dealt with.
     pub archived: bool,
+    /// When you last opened it in Desktop.
+    pub focused: Option<SystemTime>,
     /// The message Desktop's summary is about.
     pub summary_for: Option<String>,
     /// Set when the conversation went on after that message, answered in Claude Code say:

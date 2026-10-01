@@ -32,6 +32,7 @@ pub fn symbol(app: &App, due: Due) -> (&'static str, Color) {
         Due::Waiting => ("◆", theme.blocked),
         Due::Running => (SPINNER[app.frame % SPINNER.len()], theme.working),
         Due::Failed => ("✗", theme.error),
+        Due::Seen => ("◇", theme.blocked),
         Due::Late => ("!", theme.warn),
         Due::Done => ("✓", theme.ok),
         Due::Never => ("○", theme.free),
@@ -45,6 +46,7 @@ pub fn label(app: &App, due: Due) -> &'static str {
         Due::Waiting => text.state_blocked,
         Due::Running => text.due_running,
         Due::Failed => text.due_failed,
+        Due::Seen => text.due_seen,
         Due::Late => text.due_late,
         Due::Done => text.due_done,
         Due::Never => text.due_never,
@@ -284,7 +286,7 @@ fn said_spans(app: &App, i: usize, due: Due) -> Vec<Span<'static>> {
         return Vec::new();
     };
     match (&run.needs, &run.detail, &run.error) {
-        (Some(needs), _, _) if due == Due::Waiting => {
+        (Some(needs), _, _) if matches!(due, Due::Waiting | Due::Seen) => {
             vec![Span::styled(
                 needs.clone(),
                 Style::new().fg(app.theme.blocked),
@@ -480,7 +482,7 @@ fn run_lines(app: &App, i: usize, due: Due, width: usize) -> Vec<Line<'static>> 
         }
     }
     match &run.needs {
-        Some(needs) if due == Due::Waiting => {
+        Some(needs) if matches!(due, Due::Waiting | Due::Seen) => {
             lines.push(Line::default());
             lines.push(title(app, text.asks_title, None));
             for part in fmt::wrap(needs, width, 6) {

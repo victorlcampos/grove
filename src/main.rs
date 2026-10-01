@@ -15,6 +15,7 @@ mod layout;
 mod model;
 mod opener;
 mod routines;
+mod seen;
 mod snapshot;
 mod theme;
 mod ui;

@@ -497,6 +497,7 @@ fn run(id: &str, title: &str, cwd: &str, minutes: u64) -> Run {
         needs: None,
         error: None,
         archived: false,
+        focused: None,
         summary_for: None,
         answered: false,
     }

@@ -316,9 +316,15 @@ Among the sessions, `◆`, `⠸` and `●` say what the session that has the
 conversation open is doing, `○` is a closed one and `✗` one whose folder is
 gone, so its command cannot work.
 
-Among the routines, `◆` is one whose last run waits for you, `⠸` one running
-now, `✗` one whose last run failed, `!` one that did not run when it was due,
-`✓` one that ran, `○` one that never ran and `‖` a paused one.
+Among the routines, `◆` is one whose last run waits for you, `◇` one that
+asks something you have seen and not answered yet (opened in Desktop as it
+stopped or after, opened from grove, or open in a terminal now; it waits
+again when it asks something new), `⠸` one running now, `✗` one whose last
+run failed, `!` one that did not run when it was due, `✓` one that ran, `○`
+one that never ran and `‖` a paused one. The header counts only the `◆` ones.
+grove keeps the runs it opened in `grove/seen.json` under the system's
+application data (`~/Library/Application Support`, `%LOCALAPPDATA%`,
+`~/.local/state`).
 
 `±12` counts changed and untracked files, `↑3 ↓1` commits ahead and behind
 the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.

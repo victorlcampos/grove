@@ -345,6 +345,7 @@ fn parse_run(json: &Value) -> Option<(String, Run)> {
         needs,
         error: text(&json["error"]),
         archived: json["isArchived"].as_bool().unwrap_or(false),
+        focused: millis(&json["lastFocusedAt"]),
         summary_for: text(&json["postTurnSummaryFor"]),
         answered: false,
     };

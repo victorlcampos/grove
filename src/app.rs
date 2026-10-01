@@ -26,6 +26,7 @@ use crate::model::{
 };
 use crate::opener::{self, Opener};
 use crate::routines;
+use crate::seen::Seen;
 use crate::theme::Theme;
 use crate::worker::{Msg, RemoveJob, SizeJob, Workers};
 
@@ -46,6 +47,9 @@ const START_SLACK: Duration = Duration::from_secs(2);
 const LATE_AFTER: TimeDelta = TimeDelta::minutes(10);
 /// A run that started this much before the time it was due still counts for it.
 const DUE_SLACK: Duration = Duration::from_secs(120);
+/// A run opened in Desktop this long before it last stopped was seen as it stopped: you
+/// were on it.
+const FOCUS_SLACK: Duration = Duration::from_secs(5 * 60);
 
 /// Which list is on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +107,8 @@ pub enum Due {
     Waiting,
     Running,
     Failed,
+    /// Its last run asks something you have seen, and not answered yet.
+    Seen,
     /// Its time passed and it did not run: Claude Desktop was closed, say.
     Late,
     Done,
@@ -300,6 +306,8 @@ pub struct App {
     pub clipboard: Clipboard,
     pub opener: Opener,
     pub launcher: Launcher,
+    /// The routine runs opened from grove.
+    pub seen: Seen,
     started: Instant,
     last_index: usize,
     history_index: usize,
@@ -321,6 +329,7 @@ impl App {
         roots: Vec<PathBuf>,
         workers: Workers,
     ) -> Self {
+        let seen = Seen::load(home.as_deref());
         Self {
             lang,
             text: lang.text(),
@@ -362,6 +371,7 @@ impl App {
             clipboard: Clipboard::System,
             opener: Opener::System,
             launcher: Launcher::System,
+            seen,
             started: Instant::now(),
             last_index: 0,
             history_index: 0,
@@ -800,7 +810,8 @@ impl App {
     /// Desktop's summary of that run says, else whether it ran when due.
     pub fn routine_state(&self, i: usize, now: DateTime<Local>) -> Due {
         let routine = &self.routines[i];
-        match self.routine_live(i).map(|session| session.activity) {
+        let live = self.routine_live(i).map(|session| session.activity);
+        match live {
             Some(Activity::Working) => return Due::Running,
             Some(Activity::Blocked) => return Due::Waiting,
             _ => {}
@@ -812,7 +823,15 @@ impl App {
             .filter(|run| !run.archived && !run.answered)
         {
             if run.needs.is_some() || run.status.as_deref() == Some("blocked") {
-                return Due::Waiting;
+                // Open in a terminal now, opened from grove, or opened in Desktop once it
+                // stopped: you have seen what it asks.
+                let seen = live.is_some()
+                    || self.seen.has(run)
+                    || run
+                        .focused
+                        .zip(run.active)
+                        .is_some_and(|(focused, active)| focused + FOCUS_SLACK >= active);
+                return if seen { Due::Seen } else { Due::Waiting };
             }
             if run.error.is_some() || matches!(run.status.as_deref(), Some("failed" | "error")) {
                 return Due::Failed;
@@ -959,6 +978,19 @@ impl App {
         }
     }
 
+    /// Keeps the last run of routine `i` as seen, at its current turn.
+    fn mark_seen(&mut self, i: usize) {
+        let Some(run) = self.routines[i].run.clone() else {
+            return;
+        };
+        let sessions: Vec<String> = self
+            .routines
+            .iter()
+            .filter_map(|routine| routine.run.as_ref().map(|run| run.session.clone()))
+            .collect();
+        self.seen.mark(&run, sessions.iter().map(String::as_str));
+    }
+
     /// Opens the last run of the selected routine in Claude Code, in a new tab of the herdr
     /// (or window of the tmux) grove runs in, to answer or approve it there; elsewhere,
     /// copies the command that does it.
@@ -983,6 +1015,7 @@ impl App {
         };
         match self.launcher.launch(&job) {
             Ok(place) => {
+                self.mark_seen(i);
                 let text = match place {
                     Place::Herdr => self.text.opened_herdr,
                     Place::Tmux => self.text.opened_tmux,
@@ -1021,7 +1054,10 @@ impl App {
             self.opener.open(&link)
         };
         match opened {
-            Ok(()) => self.toast(ToastKind::Ok, self.text.opened.replace("{name}", &name)),
+            Ok(()) => {
+                self.mark_seen(i);
+                self.toast(ToastKind::Ok, self.text.opened.replace("{name}", &name));
+            }
             Err(error) => {
                 if self.copy_routine_command() {
                     let text = format!("{}: {error}", self.text.open_failed);
@@ -1558,6 +1594,7 @@ impl App {
         app.clipboard = Clipboard::Memory(Vec::new());
         app.opener = Opener::Memory(Vec::new());
         app.launcher = Launcher::Memory(Vec::new());
+        app.seen = Seen::default();
         app.handle(Msg::Repos(repos));
         app.handle(Msg::Scan(scan));
         app
@@ -2168,6 +2205,31 @@ mod tests {
     }
 
     #[test]
+    fn a_run_opened_in_desktop_is_seen_until_it_asks_again() {
+        let mut app = demo::app();
+        let notes = routine(&app, "release-notes");
+        let now = Local::now();
+        let run = app.routines[notes].run.as_mut().unwrap();
+        let active = run.active.unwrap();
+        // Opened before it ran: what it asks came after.
+        run.focused = Some(active - Duration::from_secs(30 * 60));
+        assert_eq!(app.routine_state(notes, now), Due::Waiting);
+        // You were on it as it stopped, or opened it after.
+        for focused in [
+            active - Duration::from_secs(60),
+            active + Duration::from_secs(3600),
+        ] {
+            app.routines[notes].run.as_mut().unwrap().focused = Some(focused);
+            assert_eq!(app.routine_state(notes, now), Due::Seen);
+        }
+        assert_eq!(app.routines_waiting(), 0);
+        // A new turn asking again waits again.
+        let run = app.routines[notes].run.as_mut().unwrap();
+        run.active = Some(active + Duration::from_secs(2 * 3600));
+        assert_eq!(app.routine_state(notes, now), Due::Waiting);
+    }
+
+    #[test]
     fn a_routine_waits_until_its_run_is_dealt_with() {
         let mut app = demo::app();
         let notes = routine(&app, "release-notes");
@@ -2214,8 +2276,11 @@ mod tests {
             "Opening in Claude Code, in a new herdr tab: Release notes"
         );
         assert_eq!(app.opener.last(), None, "not in Desktop");
-        // Answered there, it no longer waits, whatever Desktop's summary says.
+        // Seen once opened: it stops waiting, though it still asks.
         let notes = routine(&app, "release-notes");
+        assert_eq!(app.routine_state(notes, Local::now()), Due::Seen);
+        assert_eq!(app.routines_waiting(), 0);
+        // Answered there, it no longer waits, whatever Desktop's summary says.
         app.routines[notes].run.as_mut().unwrap().answered = true;
         assert_eq!(app.routine_state(notes, Local::now()), Due::Done);
         assert_eq!(app.routines_waiting(), 0);
