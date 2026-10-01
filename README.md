@@ -261,11 +261,28 @@ largest.
 
 ## Install
 
+Download the archive for your system from the [latest release](https://github.com/victorlcampos/grove/releases/latest):
+macOS (Apple silicon and Intel), Linux (x86_64 and ARM) or Windows. Unpack it and put `grove`
+somewhere on your `PATH`, such as `~/.local/bin`. On macOS, a file a browser downloaded stays
+quarantined until you allow it: run `xattr -d com.apple.quarantine grove` once.
+
+Or build it, with Rust 1.88 or newer ([rustup.rs](https://rustup.rs)):
+
 ```sh
 cargo install --git https://github.com/victorlcampos/grove
 ```
 
-Needs Rust 1.88 or newer ([rustup.rs](https://rustup.rs)) and git.
+Either way it needs git.
+
+### Update
+
+```sh
+grove update           # installs the latest release over this grove
+grove update --check   # only tells whether there is a newer one
+```
+
+The new version replaces the old one only after it matches the SHA-256 published with the release
+and reports the right version.
 
 ## Usage
 

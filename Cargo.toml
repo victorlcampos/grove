@@ -1,6 +1,6 @@
 [package]
 name = "grove"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Terminal dashboard of your git worktrees: which ones a Claude Code, Codex or OpenCode session is using, how much disk each takes, removal with the right git command, and the command that resumes each conversation those agents keep"
@@ -11,7 +11,7 @@ keywords = ["git", "worktree", "tui", "claude", "disk-usage"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-cerne = { git = "https://github.com/victorlcampos/cerne", tag = "v0.1.0", features = ["tui"] }
+cerne = { git = "https://github.com/victorlcampos/cerne", tag = "v0.1.0", features = ["tui", "update"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"

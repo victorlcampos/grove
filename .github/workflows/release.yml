@@ -1,0 +1,18 @@
+name: Release
+
+# Pushing a tag with the version in Cargo.toml (git tag v0.2.0 && git push
+# origin v0.2.0) builds grove for each system and publishes the release that
+# `grove update` installs.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: victorlcampos/cerne/.github/workflows/release-cli.yml@v0.1.0
+    with:
+      binary: grove

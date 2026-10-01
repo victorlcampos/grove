@@ -28,7 +28,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
@@ -46,8 +46,11 @@ use crate::worker::{Msg, Workers};
 /// resumes one, and the routines Claude Desktop runs on a schedule, with the ones waiting for
 /// you first. Fits anything from a full screen to a small tiling pane.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Folders to look for repositories in [default: ~/Workspace, ~/Projects, ~/src, ~/code and
     /// the like, the ones that exist]. Repositories where an agent runs are always listed
     #[arg(value_name = "FOLDER")]
@@ -86,8 +89,22 @@ struct Cli {
     svg: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Update grove to the latest release
+    Update {
+        /// Only tell whether a newer version is out
+        #[arg(long)]
+        check: bool,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(Command::Update { check }) = cli.command {
+        let version = env!("CARGO_PKG_VERSION");
+        return cerne::update::run("victorlcampos/grove", "grove", version, check);
+    }
     if !git::available() {
         eprintln!("grove: git was not found; install it and try again");
         return ExitCode::from(2);
