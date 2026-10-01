@@ -7,11 +7,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use super::details::{ago, column, panel, title};
 use super::list::{self, heading_line, lead};
 use super::{centered, fit, put, put_right, put_spans, spans_width};
-use crate::app::{App, Row, State};
+use crate::app::{App, Group, Row, State};
 use crate::fmt;
 use crate::history;
 use crate::layout::{self, Density, LEAD, SessionColumns, TRAIL};
@@ -119,24 +120,30 @@ pub fn empty(buf: &mut Buffer, area: Rect, app: &App) {
     centered(buf, area, lines);
 }
 
+/// A group's heading: the project's name and where it is, or the folder.
 fn heading(buf: &mut Buffer, row: Rect, app: &App, rows: &[Row], first: usize, density: Density) {
-    let project = &app.history[first].project;
+    let group = app.group_of(first);
     let count = rows
         .iter()
-        .filter(|row| matches!(row, Row::Conversation(i) if app.history[*i].project == *project))
+        .filter(|row| matches!(row, Row::Conversation(i) if app.group_of(*i) == group))
         .count();
-    let (summary, path) = match density {
-        Density::Table(_) => (app.text.sessions_tab.of(count), Some(project.as_path())),
-        _ => (count.to_string(), None),
+    let summary = match density {
+        Density::Table(_) => app.text.sessions_tab.of(count),
+        _ => count.to_string(),
     };
-    heading_line(
-        buf,
-        row,
-        app,
-        &app.history[first].project_name,
-        path,
-        &summary,
-    );
+    let (name, path) = match app.group {
+        Group::Project => (
+            app.history[first].project_name.clone(),
+            matches!(density, Density::Table(_)).then_some(group.as_path()),
+        ),
+        // The folder is the name: cut in the middle, its last part stays.
+        Group::Folder => {
+            let room = usize::from(row.width).saturating_sub(summary.width() + 8);
+            let folder = fmt::tilde(group, app.home.as_deref());
+            (fmt::truncate_middle(&folder, room.max(8)), None)
+        }
+    };
+    heading_line(buf, row, app, &name, path, &summary);
 }
 
 fn table_row(

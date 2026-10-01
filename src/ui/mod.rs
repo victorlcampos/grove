@@ -592,7 +592,9 @@ fn key_hints<'a>(
     let mut places = Vec::new();
     let mut used = 0;
     for (key, action) in keys {
-        let action = if *key == "s" {
+        let action = if *key == "s" && app.view == View::Sessions {
+            format!("{action}: {}", app.text.groups[app.group.index()])
+        } else if *key == "s" {
             format!("{action}: {}", app.text.sorts[app.sort.index()])
         } else {
             action.to_string()

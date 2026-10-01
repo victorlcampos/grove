@@ -72,6 +72,28 @@ impl View {
     }
 }
 
+/// How the sessions list is grouped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// By the repository each conversation worked in.
+    Project,
+    /// By the folder each one works in, or worked in last.
+    Folder,
+}
+
+impl Group {
+    fn next(self) -> Self {
+        match self {
+            Group::Project => Group::Folder,
+            Group::Folder => Group::Project,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Where a routine stands, most pressing first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Due {
@@ -233,6 +255,7 @@ pub struct App {
     pub status: HashMap<PathBuf, GitState>,
     pub volume: Option<Volume>,
     pub sort: Sort,
+    pub group: Group,
     pub filter: String,
     pub mode: Mode,
     pub show_details: bool,
@@ -308,6 +331,7 @@ impl App {
             status: HashMap::new(),
             volume: None,
             sort: Sort::Activity,
+            group: Group::Project,
             filter: String::new(),
             mode: Mode::List,
             show_details: true,
@@ -679,8 +703,18 @@ impl App {
             || found(&conversation.cwd.to_string_lossy())
     }
 
-    /// The sessions list: the projects, the one with the latest conversation first, each
-    /// followed by its conversations, the open ones first and then the most recent.
+    /// What a conversation is grouped under: its repository, or the folder it works in.
+    pub fn group_of(&self, i: usize) -> &PathBuf {
+        let conversation = &self.history[i];
+        match self.group {
+            Group::Project => &conversation.project,
+            Group::Folder => &conversation.cwd,
+        }
+    }
+
+    /// The sessions list: the groups (projects or folders), the one with the latest
+    /// conversation first, each followed by its conversations, the open ones first and then
+    /// the most recent.
     pub fn rows(&self) -> Vec<Row> {
         let mut order: Vec<usize> = (0..self.history.len())
             .filter(|&i| self.shows(&self.history[i]))
@@ -690,7 +724,7 @@ impl App {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut group_of: HashMap<&PathBuf, usize> = HashMap::new();
         for i in order {
-            let group = *group_of.entry(&self.history[i].project).or_insert_with(|| {
+            let group = *group_of.entry(self.group_of(i)).or_insert_with(|| {
                 groups.push(Vec::new());
                 groups.len() - 1
             });
@@ -1019,6 +1053,7 @@ impl App {
                 self.mode = Mode::Filter;
             }
             KeyCode::Char('s') if worktrees => self.sort = self.sort.next(),
+            KeyCode::Char('s') if self.view == View::Sessions => self.group = self.group.next(),
             KeyCode::Char('r') => self.refresh(false),
             KeyCode::Char('R') => self.refresh(true),
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -1803,6 +1838,48 @@ mod tests {
                 "sketch the pricing page",
             ]
         );
+    }
+
+    #[test]
+    fn s_groups_the_sessions_by_folder() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        let headings = |app: &App| {
+            app.rows()
+                .iter()
+                .filter(|row| matches!(row, Row::Project(_)))
+                .count()
+        };
+        let by_project = headings(&app);
+        let sort = app.sort;
+        app.on_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.group, Group::Folder);
+        assert_eq!(app.sort, sort, "the worktrees keep their order");
+        // Each group holds the conversations of one folder, so a project splits.
+        let rows = app.rows();
+        let mut folder = None;
+        for row in &rows {
+            match *row {
+                Row::Project(first) => folder = Some(app.history[first].cwd.clone()),
+                Row::Conversation(i) => assert_eq!(Some(&app.history[i].cwd), folder.as_ref()),
+            }
+        }
+        assert!(headings(&app) > by_project, "{rows:?}");
+        let tools = |app: &App| {
+            app.rows()
+                .iter()
+                .filter(
+                    |row| matches!(row, Row::Project(i) if app.history[*i].project_name == "tools"),
+                )
+                .count()
+        };
+        assert!(tools(&app) > 1, "tools and tools-dns apart");
+        let screen = crate::ui::tests::text(&crate::ui::tests::draw(&mut app, 160, 40));
+        assert!(screen.contains("s group: folder"), "{screen}");
+        assert!(screen.contains("~/Workspace/tools-dns"), "{screen}");
+        app.on_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.group, Group::Project);
+        assert_eq!(headings(&app), by_project);
     }
 
     #[test]

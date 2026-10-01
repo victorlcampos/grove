@@ -284,7 +284,7 @@ grove --no-mouse       # leave the mouse to the terminal, to select text
 | `d` | Remove the worktree, stopping what runs in it |
 | `D` | Remove every idle worktree on the list |
 | `/` | Filter by name, branch, path, session name, prompt, or what a routine asks |
-| `s` | Sort the worktrees by activity, size, name or oldest |
+| `s` | Worktrees: sort by activity, size, name or oldest. Sessions: group by project or by the folder each one works in |
 | `r` | Refresh now and measure the selected worktree again |
 | `R` | Measure every worktree again |
 | `?` | Help |
@@ -343,8 +343,12 @@ the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.
   command is copied with the system's tool (`pbcopy`, `wl-copy`, `xclip`,
   `xsel`, `clip`), or through the terminal (OSC 52) over SSH or without one.
 - **Routines** come from Claude Desktop's own records, in its application
-  data (`~/Library/Application Support/Claude` on macOS, `%APPDATA%\Claude`
-  on Windows, `~/.config/Claude` elsewhere): `claude-code-sessions/<account>/<organization>/scheduled-tasks.json`
+  data, found anew on every look: `~/Library/Application Support/Claude` on
+  macOS; on Windows `%APPDATA%\Claude`, or, installed from the Microsoft
+  Store, `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`;
+  `~/.config/Claude` elsewhere; or the folder in `GROVE_DESKTOP_DIR`.
+  `claude-code-sessions/<account>/<organization>/scheduled-tasks.json` (and
+  `local-agent-mode-sessions/…` for agent mode, in the same format)
   lists them with their cron schedule (in local time) and last run, and each
   session Desktop opens is a `local_<id>.json` beside it. The latest one that
   names a routine is its last run, and Desktop's summary of its last turn

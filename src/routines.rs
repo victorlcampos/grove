@@ -1,7 +1,8 @@
 //! The routines Claude Desktop runs on a schedule, and how each one's latest run went.
 //!
-//! Desktop keeps a folder per account and organization under `claude-code-sessions` in its
-//! application data: `scheduled-tasks.json` there lists the routines (schedule, folder,
+//! Desktop keeps a folder per account and organization under `claude-code-sessions` (and,
+//! for agent mode, `local-agent-mode-sessions`) in its application data, wherever the system
+//! and the way it was installed put that: `scheduled-tasks.json` there lists the routines (schedule, folder,
 //! prompt file, last run), and every session it opens, a run of a routine among them, is a
 //! `local_<id>.json` beside it. A run's file names its routine (`scheduledTaskId`) and keeps
 //! Desktop's summary of its last turn (`postTurnSummary`), which says whether it waits for
@@ -26,8 +27,10 @@ const TEXT: usize = 500;
 type Stamp = (Option<SystemTime>, u64);
 
 pub struct Desktop {
-    /// The `claude-code-sessions` folders to look in.
-    roots: Vec<PathBuf>,
+    home: Option<PathBuf>,
+    /// The folders to look in, when they are given; else they are looked for every time, so
+    /// a Desktop installed or signed in since grove started is found.
+    roots: Option<Vec<PathBuf>>,
     /// What each session file said at the time it had its stamp: the routine it ran, and
     /// the run.
     read: HashMap<PathBuf, (Stamp, Option<(String, Run)>)>,
@@ -35,12 +38,18 @@ pub struct Desktop {
 
 impl Desktop {
     pub fn new(home: Option<&Path>) -> Self {
-        Self::at(roots(home))
+        Self {
+            home: home.map(Path::to_path_buf),
+            roots: None,
+            read: HashMap::new(),
+        }
     }
 
+    #[cfg(test)]
     pub fn at(roots: Vec<PathBuf>) -> Self {
         Self {
-            roots,
+            home: None,
+            roots: Some(roots),
             read: HashMap::new(),
         }
     }
@@ -49,8 +58,11 @@ impl Desktop {
     pub fn load(&mut self) -> Vec<Routine> {
         let mut routines = Vec::new();
         let mut seen = Vec::new();
-        let orgs: Vec<PathBuf> = self
-            .roots
+        let roots = match &self.roots {
+            Some(roots) => roots.clone(),
+            None => roots(self.home.as_deref()),
+        };
+        let orgs: Vec<PathBuf> = roots
             .iter()
             .flat_map(|root| children(root))
             .flat_map(|account| children(&account))
@@ -126,27 +138,84 @@ pub fn command(routine: &Routine, home: Option<&Path>) -> Option<String> {
     })
 }
 
-/// Where Desktop keeps its sessions on each system.
-pub fn roots(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if cfg!(windows) {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            roots.push(PathBuf::from(appdata).join("Claude"));
-        }
-    } else if let Some(home) = home {
+/// The systems whose Desktop folders differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum System {
+    Mac,
+    Windows,
+    Other,
+}
+
+impl System {
+    fn current() -> Self {
         if cfg!(target_os = "macos") {
-            roots.push(home.join("Library/Application Support/Claude"));
+            System::Mac
+        } else if cfg!(windows) {
+            System::Windows
         } else {
-            let config = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config"));
-            roots.push(config.join("Claude"));
+            System::Other
         }
     }
-    roots
+}
+
+/// The folders under Desktop's data that keep routines: those of Claude Code sessions and
+/// those of agent mode, in the same format.
+const KINDS: [&str; 2] = ["claude-code-sessions", "local-agent-mode-sessions"];
+
+/// Where Desktop keeps its routines on this computer: `$GROVE_DESKTOP_DIR` when set, else
+/// where each system puts Desktop's data, the ones that exist.
+pub fn roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let found: Vec<PathBuf> = data_dirs(System::current(), home, |name| std::env::var_os(name))
         .into_iter()
-        .map(|root| root.join("claude-code-sessions"))
-        .collect()
+        .flat_map(|dir| KINDS.map(|kind| dir.join(kind)))
+        .collect();
+    let existing: Vec<PathBuf> = found.iter().filter(|dir| dir.is_dir()).cloned().collect();
+    // With none, all of them, to say where grove looked.
+    if existing.is_empty() { found } else { existing }
+}
+
+/// The folders Desktop may keep its data in. On Windows it is in the roaming application
+/// data, or, installed from the Microsoft Store, in its package's own copy of it, under a
+/// folder named after the package (`Claude_<publisher>`).
+fn data_dirs(
+    system: System,
+    home: Option<&Path>,
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    if let Some(dir) = var("GROVE_DESKTOP_DIR").filter(|dir| !dir.is_empty()) {
+        return vec![PathBuf::from(dir)];
+    }
+    let mut dirs = Vec::new();
+    match system {
+        System::Mac => {
+            dirs.extend(home.map(|home| home.join("Library/Application Support/Claude")))
+        }
+        System::Windows => {
+            dirs.extend(var("APPDATA").map(|dir| PathBuf::from(dir).join("Claude")));
+            if let Some(local) = var("LOCALAPPDATA").map(PathBuf::from) {
+                dirs.push(local.join("Claude"));
+                let packages = children(&local.join("Packages"));
+                dirs.extend(
+                    packages
+                        .into_iter()
+                        .filter(|package| {
+                            package
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.starts_with("Claude_"))
+                        })
+                        .map(|package| package.join("LocalCache/Roaming/Claude")),
+                );
+            }
+        }
+        System::Other => {
+            let config = var("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.map(|home| home.join(".config")));
+            dirs.extend(config.map(|config| config.join("Claude")));
+        }
+    }
+    dirs
 }
 
 fn children(dir: &Path) -> Vec<PathBuf> {
@@ -345,6 +414,67 @@ mod tests {
         let routines = desktop.load();
         let run = routines[0].run.as_ref().unwrap();
         assert_eq!((run.status.as_deref(), run.needs.as_deref()), (None, None));
+    }
+
+    #[test]
+    fn finds_desktop_on_each_system() {
+        let none = |_: &str| None;
+        let home = Path::new("/Users/me");
+        assert_eq!(
+            data_dirs(System::Mac, Some(home), none),
+            [PathBuf::from(
+                "/Users/me/Library/Application Support/Claude"
+            )]
+        );
+        assert_eq!(
+            data_dirs(System::Other, Some(home), none),
+            [PathBuf::from("/Users/me/.config/Claude")]
+        );
+        // Installed from the Microsoft Store, its data is in its package, whatever the
+        // publisher part of the package's name.
+        let local = Scratch::new("localappdata");
+        for package in [
+            "Claude_pzs8sxrjxfjjc",
+            "Microsoft.WindowsTerminal_8wekyb3d8bbwe",
+        ] {
+            fs::create_dir_all(local.0.join("Packages").join(package)).unwrap();
+        }
+        let windows = |name: &str| match name {
+            "APPDATA" => Some(r"C:\Users\me\AppData\Roaming".into()),
+            "LOCALAPPDATA" => Some(local.0.clone().into_os_string()),
+            _ => None,
+        };
+        assert_eq!(
+            data_dirs(System::Windows, None, windows),
+            [
+                PathBuf::from(r"C:\Users\me\AppData\Roaming").join("Claude"),
+                local.0.join("Claude"),
+                local
+                    .0
+                    .join("Packages/Claude_pzs8sxrjxfjjc")
+                    .join("LocalCache/Roaming/Claude"),
+            ]
+        );
+        // A folder of your own wins on any system.
+        let mine = |name: &str| (name == "GROVE_DESKTOP_DIR").then(|| "/elsewhere/Claude".into());
+        assert_eq!(
+            data_dirs(System::Windows, Some(home), mine),
+            [PathBuf::from("/elsewhere/Claude")]
+        );
+    }
+
+    #[test]
+    fn reads_agent_mode_routines_too() {
+        let (dir, _) = desktop();
+        let agent = dir.0.join("agent/account/org");
+        fs::create_dir_all(&agent).unwrap();
+        let tasks = serde_json::json!({ "scheduledTasks": [
+            { "id": "weekly-review", "cronExpression": "0 9 * * 1", "enabled": true }
+        ]});
+        fs::write(agent.join("scheduled-tasks.json"), tasks.to_string()).unwrap();
+        let mut desktop = Desktop::at(vec![dir.0.clone(), dir.0.join("agent")]);
+        let ids: Vec<String> = desktop.load().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, ["status", "notices", "weekly-review"]);
     }
 
     #[test]
