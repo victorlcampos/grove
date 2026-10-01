@@ -160,6 +160,10 @@ pub struct Text {
     pub late_note: &'static str,
     pub routine_copy_hint: &'static str,
     pub opened: &'static str,
+    pub opened_herdr: &'static str,
+    pub opened_tmux: &'static str,
+    pub no_multiplexer: &'static str,
+    pub answered_note: &'static str,
     pub open_failed: &'static str,
     pub open_remote: &'static str,
     pub list_keys: Keys,
@@ -305,8 +309,12 @@ const EN: Text = Text {
     asks_title: "IT ASKS",
     never_ran: "It has not run yet",
     late_note: "It did not run at {time}: Claude Desktop runs it when it is open",
-    routine_copy_hint: "⏎ opens it in Claude Desktop, to answer or approve · c copies this",
+    routine_copy_hint: "⏎ opens it in Claude Code here, to answer or approve · o in Desktop · c copies",
     opened: "Opened in Claude Desktop: {name}",
+    opened_herdr: "Opening in Claude Code, in a new herdr tab: {name}",
+    opened_tmux: "Opened in Claude Code, in a new tmux window: {name}",
+    no_multiplexer: "Not in herdr or tmux: paste the command in a terminal",
+    answered_note: "Answered since outside Desktop: its summary is older",
     open_failed: "Could not open Claude Desktop, so the command was copied",
     open_remote: "over SSH, Desktop would open on the other computer",
     list_keys: &[
@@ -339,8 +347,9 @@ const EN: Text = Text {
     session_details_keys: &[("Esc", "back"), ("⏎", "copy command")],
     routines_keys: &[
         ("↑↓", "move"),
-        ("⏎", "open in Desktop"),
-        ("c", "copy command"),
+        ("⏎", "open in Claude Code"),
+        ("o", "Desktop"),
+        ("c", "copy"),
         ("i", "details"),
         ("←", "sessions"),
         ("/", "filter"),
@@ -350,8 +359,9 @@ const EN: Text = Text {
     ],
     routine_details_keys: &[
         ("Esc", "back"),
-        ("⏎", "open in Desktop"),
-        ("c", "copy command"),
+        ("⏎", "open in Claude Code"),
+        ("o", "Desktop"),
+        ("c", "copy"),
     ],
     help_keys: &[
         ("↑ ↓  j k", "move"),
@@ -365,8 +375,9 @@ const EN: Text = Text {
         ("t", "the routines Claude Desktop runs on a schedule"),
         (
             "Enter",
-            "worktrees: show or hide the details · sessions: copy the command that resumes it · routines: open the last run in Claude Desktop",
+            "worktrees: show or hide the details · sessions: copy the command that resumes it · routines: open the last run in Claude Code, in a new herdr tab or tmux window",
         ),
+        ("o", "routines: open the last run in Claude Desktop"),
         (
             "c",
             "routines: copy the command that resumes the last run in a terminal",
@@ -525,8 +536,12 @@ const PT: Text = Text {
     asks_title: "ELA PERGUNTA",
     never_ran: "Ainda não rodou",
     late_note: "Não rodou às {time}: o Claude Desktop só roda quando está aberto",
-    routine_copy_hint: "⏎ abre no Claude Desktop, para responder ou aprovar · c copia isto",
+    routine_copy_hint: "⏎ abre no Claude Code aqui, para responder ou aprovar · o no Desktop · c copia",
     opened: "Aberta no Claude Desktop: {name}",
+    opened_herdr: "Abrindo no Claude Code, numa aba nova do herdr: {name}",
+    opened_tmux: "Aberta no Claude Code, numa janela nova do tmux: {name}",
+    no_multiplexer: "Fora do herdr e do tmux: cole o comando num terminal",
+    answered_note: "Respondida depois fora do Desktop: o resumo dele é anterior",
     open_failed: "Não deu para abrir o Claude Desktop, então copiei o comando",
     open_remote: "por SSH, o Desktop abriria no outro computador",
     list_keys: &[
@@ -559,8 +574,9 @@ const PT: Text = Text {
     session_details_keys: &[("Esc", "voltar"), ("⏎", "copiar comando")],
     routines_keys: &[
         ("↑↓", "mover"),
-        ("⏎", "abrir no Desktop"),
-        ("c", "copiar comando"),
+        ("⏎", "abrir no Claude Code"),
+        ("o", "Desktop"),
+        ("c", "copiar"),
         ("i", "detalhes"),
         ("←", "sessões"),
         ("/", "filtrar"),
@@ -570,8 +586,9 @@ const PT: Text = Text {
     ],
     routine_details_keys: &[
         ("Esc", "voltar"),
-        ("⏎", "abrir no Desktop"),
-        ("c", "copiar comando"),
+        ("⏎", "abrir no Claude Code"),
+        ("o", "Desktop"),
+        ("c", "copiar"),
     ],
     help_keys: &[
         ("↑ ↓  j k", "mover"),
@@ -582,8 +599,9 @@ const PT: Text = Text {
         ("t", "as rotinas que o Claude Desktop roda com agenda"),
         (
             "Enter",
-            "worktrees: mostrar ou esconder os detalhes · sessões: copiar o comando que a retoma · rotinas: abrir a última execução no Claude Desktop",
+            "worktrees: mostrar ou esconder os detalhes · sessões: copiar o comando que a retoma · rotinas: abrir a última execução no Claude Code, numa aba nova do herdr ou janela do tmux",
         ),
+        ("o", "rotinas: abrir a última execução no Claude Desktop"),
         (
             "c",
             "rotinas: copiar o comando que retoma a última execução num terminal",

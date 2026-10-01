@@ -234,10 +234,15 @@ largest.
   failed, whether one did not run when it was due (Desktop runs them only
   while it is open), the schedule in words (`weekdays 17:30`) and when it
   runs next. The header counts the routines waiting for you from every list,
-  and a click on it opens them. `Enter` opens the last run in Claude Desktop
-  (`claude://code/continue?session=local_<id>`), to answer or approve it
-  there; `c` copies `cd <folder> && claude --resume <id>` instead, for a
-  terminal, and so does `Enter` over SSH.
+  and a click on it opens them. `Enter` opens the last run in Claude Code,
+  to answer or approve it right there: in a new herdr tab named after the
+  routine, where herdr starts it as an agent (`herdr agent start --kind claude
+  -- --resume <id>`), or a new tmux window, whichever grove runs in, over SSH
+  too. Answered there, it stops waiting, though Desktop's summary still asks:
+  grove sees the conversation went on. `o` opens it in Claude Desktop instead
+  (`claude://code/continue?session=local_<id>`), and `c` copies
+  `cd <folder> && claude --resume <id>`, which `Enter` does outside herdr and
+  tmux.
 - **Removal in one step.** `d` asks once and removes: it stops whatever runs
   in the worktree (agent sessions, servers, shells), then runs
   `git worktree remove --force`, twice forced for a locked worktree, as git
@@ -280,7 +285,8 @@ grove --no-mouse       # leave the mouse to the terminal, to select text
 | `←` `→` or `h` `l` | Go between the worktrees, the sessions and the routines (or click a tab on top) |
 | `1` `2` `3` | Go to the worktrees, the sessions or the routines |
 | `t` | Go to Claude Desktop's routines |
-| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one. Routines: open the last run in Claude Desktop, to answer or approve it |
+| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one. Routines: open the last run in Claude Code, in a new herdr tab or tmux window, to answer or approve it |
+| `o` | Routines: open the last run in Claude Desktop |
 | `c` | Routines: copy the command that resumes the last run in a terminal |
 | `i` | Show or hide the details |
 | `d` | Remove the worktree, stopping what runs in it |

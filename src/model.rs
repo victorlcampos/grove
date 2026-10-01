@@ -252,6 +252,11 @@ pub struct Run {
     pub error: Option<String>,
     /// Archived in Desktop: dealt with.
     pub archived: bool,
+    /// The message Desktop's summary is about.
+    pub summary_for: Option<String>,
+    /// Set when the conversation went on after that message, answered in Claude Code say:
+    /// Desktop writes its summary only for what it runs itself, so it is out of date.
+    pub answered: bool,
 }
 
 /// The name a worktree is shown by: its folder, or the repository's name for the main one.

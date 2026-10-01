@@ -468,6 +468,12 @@ fn run_lines(app: &App, i: usize, due: Due, width: usize) -> Vec<Line<'static>> 
     if let Some(title) = &run.title {
         lines.push(Line::raw(fmt::truncate(title, width)));
     }
+    if run.answered {
+        lines.push(Line::styled(
+            fmt::truncate(app.text.answered_note, width),
+            theme.muted(),
+        ));
+    }
     if let Some(error) = &run.error {
         for part in fmt::wrap(error, width, 3) {
             lines.push(Line::styled(part, Style::new().fg(theme.error)));

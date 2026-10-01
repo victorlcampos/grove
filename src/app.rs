@@ -20,6 +20,7 @@ use crate::fmt;
 use crate::git::{Force, Status};
 use crate::history;
 use crate::i18n::{Lang, Text};
+use crate::launch::{Launch, Launcher, Place};
 use crate::model::{
     Activity, Agent, Conversation, Repo, Routine, Scan, Session, Worktree, worktree_name,
 };
@@ -298,6 +299,7 @@ pub struct App {
     pub routines_offset: usize,
     pub clipboard: Clipboard,
     pub opener: Opener,
+    pub launcher: Launcher,
     started: Instant,
     last_index: usize,
     history_index: usize,
@@ -359,6 +361,7 @@ impl App {
             routines_offset: 0,
             clipboard: Clipboard::System,
             opener: Opener::System,
+            launcher: Launcher::System,
             started: Instant::now(),
             last_index: 0,
             history_index: 0,
@@ -802,7 +805,12 @@ impl App {
             Some(Activity::Blocked) => return Due::Waiting,
             _ => {}
         }
-        if let Some(run) = routine.run.as_ref().filter(|run| !run.archived) {
+        // Archived in Desktop, or answered in Claude Code since its summary: dealt with.
+        if let Some(run) = routine
+            .run
+            .as_ref()
+            .filter(|run| !run.archived && !run.answered)
+        {
             if run.needs.is_some() || run.status.as_deref() == Some("blocked") {
                 return Due::Waiting;
             }
@@ -943,11 +951,54 @@ impl App {
     }
 
     /// Picks the selected conversation or routine run up again: copies the command that
-    /// resumes a conversation, and opens a routine's run in Claude Desktop.
+    /// resumes a conversation, and opens a routine's run in Claude Code beside grove.
     fn resume(&mut self) {
         match self.view {
-            View::Routines => self.open_routine(),
+            View::Routines => self.open_here(),
             _ => self.copy_conversation_command(),
+        }
+    }
+
+    /// Opens the last run of the selected routine in Claude Code, in a new tab of the herdr
+    /// (or window of the tmux) grove runs in, to answer or approve it there; elsewhere,
+    /// copies the command that does it.
+    fn open_here(&mut self) {
+        let Some(i) = self.picked_routine() else {
+            return;
+        };
+        let routine = &self.routines[i];
+        let Some(run) = &routine.run else {
+            self.toast(ToastKind::Info, self.text.never_ran.to_string());
+            return;
+        };
+        let Some(conversation) = run.conversation.clone() else {
+            self.copy_routine_command();
+            return;
+        };
+        let job = Launch {
+            name: routine.name.clone(),
+            agent: routine.id.clone(),
+            dir: run.cwd.clone().or_else(|| routine.cwd.clone()),
+            conversation,
+        };
+        match self.launcher.launch(&job) {
+            Ok(place) => {
+                let text = match place {
+                    Place::Herdr => self.text.opened_herdr,
+                    Place::Tmux => self.text.opened_tmux,
+                };
+                self.toast(ToastKind::Ok, text.replace("{name}", &job.name));
+            }
+            Err(error) => {
+                if self.copy_routine_command() {
+                    let note = if error.is_empty() {
+                        self.text.no_multiplexer.to_string()
+                    } else {
+                        error
+                    };
+                    self.toast(ToastKind::Info, note);
+                }
+            }
         }
     }
 
@@ -1080,6 +1131,7 @@ impl App {
             KeyCode::Char('c') if self.view == View::Routines => {
                 self.copy_routine_command();
             }
+            KeyCode::Char('o') if self.view == View::Routines => self.open_routine(),
             KeyCode::Enter | KeyCode::Char('i') => self.toggle_details(),
             KeyCode::Char('d') | KeyCode::Delete if worktrees => self.ask_removal(),
             KeyCode::Char('D') if worktrees => self.ask_idle_removal(),
@@ -1125,6 +1177,7 @@ impl App {
             KeyCode::Char('c') if self.view == View::Routines => {
                 self.copy_routine_command();
             }
+            KeyCode::Char('o') if self.view == View::Routines => self.open_routine(),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h' | 'i' | 'q') => {
                 self.mode = Mode::List;
             }
@@ -1504,6 +1557,7 @@ impl App {
         let mut app = App::new(Lang::En, Theme::rgb(), None, Vec::new(), Workers::idle());
         app.clipboard = Clipboard::Memory(Vec::new());
         app.opener = Opener::Memory(Vec::new());
+        app.launcher = Launcher::Memory(Vec::new());
         app.handle(Msg::Repos(repos));
         app.handle(Msg::Scan(scan));
         app
@@ -2142,10 +2196,36 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_a_routine_run_in_desktop_and_c_copies_its_command() {
+    fn enter_opens_a_routine_run_in_claude_code_beside_grove() {
         let mut app = demo::app();
         app.on_key(KeyEvent::from(KeyCode::Char('t')));
         app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            app.launcher.last(),
+            Some(&Launch {
+                name: "Release notes".into(),
+                agent: "release-notes".into(),
+                dir: Some(PathBuf::from("/Users/me/Workspace/shop")),
+                conversation: "a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01".into(),
+            })
+        );
+        assert_eq!(
+            app.toasts[0].text,
+            "Opening in Claude Code, in a new herdr tab: Release notes"
+        );
+        assert_eq!(app.opener.last(), None, "not in Desktop");
+        // Answered there, it no longer waits, whatever Desktop's summary says.
+        let notes = routine(&app, "release-notes");
+        app.routines[notes].run.as_mut().unwrap().answered = true;
+        assert_eq!(app.routine_state(notes, Local::now()), Due::Done);
+        assert_eq!(app.routines_waiting(), 0);
+    }
+
+    #[test]
+    fn o_opens_a_routine_run_in_desktop_and_c_copies_its_command() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        app.on_key(KeyEvent::from(KeyCode::Char('o')));
         assert_eq!(
             app.opener.last(),
             Some("claude://code/continue?session=local_a1b2c3d4"),
@@ -2163,6 +2243,9 @@ mod tests {
         );
         // One that never ran has nothing to open.
         app.picked = Some(app.routines[routine(&app, "inbox-triage")].key.clone());
+        app.toasts.clear();
+        app.on_key(KeyEvent::from(KeyCode::Char('o')));
+        assert_eq!(app.toasts[0].text, "It has not run yet");
         app.toasts.clear();
         app.on_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.toasts[0].text, "It has not run yet");

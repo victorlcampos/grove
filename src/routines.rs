@@ -9,7 +9,8 @@
 //! you and what for. Those files grow large, so one is read again only when it changes.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,8 @@ use crate::{fmt, history};
 
 /// Prompts' descriptions and run summaries are kept to this many characters.
 const TEXT: usize = 500;
+/// How much of the end of a run's transcript is read to tell whether it went on.
+const TAIL: u64 = 256 * 1024;
 
 /// The file's modification time and length, which say whether it changed.
 type Stamp = (Option<SystemTime>, u64);
@@ -34,14 +37,24 @@ pub struct Desktop {
     /// What each session file said at the time it had its stamp: the routine it ran, and
     /// the run.
     read: HashMap<PathBuf, (Stamp, Option<(String, Run)>)>,
+    /// Where Claude Code keeps its transcripts, the runs' among them.
+    projects: Option<PathBuf>,
+    /// Whether each run's transcript went on past Desktop's summary, at the transcript's stamp.
+    went_on: HashMap<PathBuf, (Stamp, String, bool)>,
 }
 
 impl Desktop {
     pub fn new(home: Option<&Path>) -> Self {
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.map(|home| home.join(".claude")));
         Self {
             home: home.map(Path::to_path_buf),
             roots: None,
             read: HashMap::new(),
+            projects: claude.map(|dir| dir.join("projects")),
+            went_on: HashMap::new(),
         }
     }
 
@@ -51,7 +64,48 @@ impl Desktop {
             home: None,
             roots: Some(roots),
             read: HashMap::new(),
+            projects: None,
+            went_on: HashMap::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_projects(mut self, projects: PathBuf) -> Self {
+        self.projects = Some(projects);
+        self
+    }
+
+    /// Whether a run's conversation went on after the message Desktop summed up: a prompt or
+    /// an answer written since, in Claude Code say. Opening the run in Desktop only adds
+    /// bookkeeping lines, which do not count.
+    fn went_on(&mut self, run: &Run) -> bool {
+        let (Some(projects), Some(id), Some(summary_for)) =
+            (&self.projects, &run.conversation, &run.summary_for)
+        else {
+            return false;
+        };
+        let file = format!("{id}.jsonl");
+        let Some(path) = children(projects)
+            .into_iter()
+            .map(|dir| dir.join(&file))
+            .find(|path| path.is_file())
+        else {
+            return false;
+        };
+        let Ok(meta) = fs::metadata(&path) else {
+            return false;
+        };
+        let stamp = (meta.modified().ok(), meta.len());
+        if let Some((kept, kept_for, went)) = self.went_on.get(&path)
+            && *kept == stamp
+            && kept_for == summary_for
+        {
+            return *went;
+        }
+        let went = tail(&path, TAIL).is_some_and(|text| moved_past(&text, summary_for));
+        self.went_on
+            .insert(path, (stamp, summary_for.clone(), went));
+        went
     }
 
     /// Every routine, with its latest run.
@@ -96,7 +150,12 @@ impl Desktop {
                 .cloned()
                 .unwrap_or_default();
             for task in &tasks {
-                if let Some(routine) = routine(&org, task, &mut runs) {
+                if let Some(mut routine) = routine(&org, task, &mut runs) {
+                    if let Some(run) = routine.run.as_mut()
+                        && (run.needs.is_some() || run.status.is_some())
+                    {
+                        run.answered = self.went_on(run);
+                    }
                     routines.push(routine);
                 }
             }
@@ -286,8 +345,53 @@ fn parse_run(json: &Value) -> Option<(String, Run)> {
         needs,
         error: text(&json["error"]),
         archived: json["isArchived"].as_bool().unwrap_or(false),
+        summary_for: text(&json["postTurnSummaryFor"]),
+        answered: false,
     };
     Some((routine, run))
+}
+
+/// The last `bytes` of a file, from the first whole line in them.
+fn tail(path: &Path, bytes: u64) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(if start > 0 {
+        text.split_once('\n')
+            .map_or(String::new(), |(_, rest)| rest.to_string())
+    } else {
+        text
+    })
+}
+
+/// Whether a transcript has a prompt or an answer after the message `uuid`; one that grew
+/// past the part read without it went on too.
+fn moved_past(text: &str, uuid: &str) -> bool {
+    let mut seen = false;
+    let mut found = false;
+    for line in text.lines() {
+        let Ok(json) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if json["uuid"].as_str() == Some(uuid) {
+            found = true;
+            seen = false;
+            continue;
+        }
+        let message = matches!(json["type"].as_str(), Some("user" | "assistant"))
+            && !json["isMeta"].as_bool().unwrap_or(false)
+            && !json["isSidechain"].as_bool().unwrap_or(false);
+        seen |= message;
+    }
+    if found {
+        seen
+    } else {
+        seen && text.len() as u64 >= TAIL - 1024
+    }
 }
 
 fn routine(org: &Path, task: &Value, runs: &mut HashMap<String, Run>) -> Option<Routine> {
@@ -508,6 +612,38 @@ mod tests {
             odd.run.as_mut().unwrap().session = session.to_string();
             assert_eq!(desktop_link(&odd), None, "{session}");
         }
+    }
+
+    #[test]
+    fn a_run_answered_in_claude_code_no_longer_waits() {
+        let (dir, _) = desktop();
+        let projects = dir.0.join("projects");
+        let folder = projects.join("-Users-me-code");
+        fs::create_dir_all(&folder).unwrap();
+        let transcript = folder.join("cli-local_new.jsonl");
+        let line = |kind: &str, uuid: &str| {
+            serde_json::json!({ "type": kind, "uuid": uuid, "message": { "content": "…" } })
+                .to_string()
+        };
+        // Opening the run in Desktop only adds bookkeeping lines.
+        let opened = [
+            line("user", "u0"),
+            line("assistant", "u1"),
+            r#"{"type":"last-prompt"}"#.to_string(),
+            r#"{"type":"cost-state"}"#.to_string(),
+        ];
+        fs::write(&transcript, opened.join("\n")).unwrap();
+        let mut desktop = Desktop::at(vec![dir.0.clone()]).with_projects(projects);
+        let run = |desktop: &mut Desktop| desktop.load()[0].run.clone().unwrap();
+        assert!(!run(&mut desktop).answered);
+        // An answer in Claude Code goes on past the message Desktop summed up.
+        let answered = [
+            opened.join("\n"),
+            line("user", "u2"),
+            line("assistant", "u3"),
+        ];
+        fs::write(&transcript, answered.join("\n")).unwrap();
+        assert!(run(&mut desktop).answered);
     }
 
     #[test]

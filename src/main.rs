@@ -10,6 +10,7 @@ mod fmt;
 mod git;
 mod history;
 mod i18n;
+mod launch;
 mod layout;
 mod model;
 mod opener;
