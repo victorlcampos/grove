@@ -11,6 +11,7 @@ keywords = ["git", "worktree", "tui", "claude", "disk-usage"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+cerne = { git = "https://github.com/victorlcampos/cerne", tag = "v0.1.0", features = ["tui"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"

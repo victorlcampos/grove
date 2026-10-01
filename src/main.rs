@@ -74,7 +74,7 @@ struct Cli {
     routines: bool,
 
     /// Print one screen of this size (like 120x40) after scanning for a while, and exit
-    #[arg(long, value_name = "WxH", value_parser = parse_size, hide = true)]
+    #[arg(long, value_name = "WxH", value_parser = snapshot::parse_size, hide = true)]
     snapshot: Option<(u16, u16)>,
 
     /// With --snapshot: seconds to scan before printing
@@ -84,17 +84,6 @@ struct Cli {
     /// With --snapshot: also write the screen as an SVG picture
     #[arg(long, value_name = "FILE", hide = true)]
     svg: Option<PathBuf>,
-}
-
-fn parse_size(text: &str) -> Result<(u16, u16), String> {
-    let (width, height) = text
-        .split_once('x')
-        .ok_or_else(|| format!("{text:?} is not like 120x40"))?;
-    let number = |part: &str| {
-        part.parse::<u16>()
-            .map_err(|error| format!("{part:?}: {error}"))
-    };
-    Ok((number(width)?, number(height)?))
 }
 
 fn main() -> ExitCode {
