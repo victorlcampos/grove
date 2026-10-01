@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{DateTime, Local, TimeDelta};
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -19,7 +20,13 @@ use crate::fmt;
 use crate::git::{Force, Status};
 use crate::history;
 use crate::i18n::{Lang, Text};
-use crate::model::{Activity, Agent, Conversation, Repo, Scan, Session, Worktree, worktree_name};
+use crate::launch::{Launch, Launcher, Place};
+use crate::model::{
+    Activity, Agent, Conversation, Repo, Routine, Scan, Session, Worktree, worktree_name,
+};
+use crate::opener::{self, Opener};
+use crate::routines;
+use crate::seen::Seen;
 use crate::theme::Theme;
 use crate::worker::{Msg, RemoveJob, SizeJob, Workers};
 
@@ -36,6 +43,13 @@ const GONE_TTL: Duration = Duration::from_secs(30);
 /// A Codex or OpenCode session has the latest conversation of its folder open when that was
 /// written since the session started, give or take this much.
 const START_SLACK: Duration = Duration::from_secs(2);
+/// A routine is late when its time passed this long ago and no run started for it.
+const LATE_AFTER: TimeDelta = TimeDelta::minutes(10);
+/// A run that started this much before the time it was due still counts for it.
+const DUE_SLACK: Duration = Duration::from_secs(120);
+/// A run opened in Desktop this long before it last stopped was seen as it stopped: you
+/// were on it.
+const FOCUS_SLACK: Duration = Duration::from_secs(5 * 60);
 
 /// Which list is on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +57,63 @@ pub enum View {
     Worktrees,
     /// The conversations agents keep, to pick one up again.
     Sessions,
+    /// The routines Claude Desktop runs on a schedule.
+    Routines,
+}
+
+impl View {
+    /// The list on the right of this one, like their tabs on top.
+    fn right(self) -> Self {
+        match self {
+            View::Worktrees => View::Sessions,
+            View::Sessions | View::Routines => View::Routines,
+        }
+    }
+
+    fn left(self) -> Self {
+        match self {
+            View::Worktrees | View::Sessions => View::Worktrees,
+            View::Routines => View::Sessions,
+        }
+    }
+}
+
+/// How the sessions list is grouped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// By the repository each conversation worked in.
+    Project,
+    /// By the folder each one works in, or worked in last.
+    Folder,
+}
+
+impl Group {
+    fn next(self) -> Self {
+        match self {
+            Group::Project => Group::Folder,
+            Group::Folder => Group::Project,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Where a routine stands, most pressing first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Due {
+    /// Its last run waits for an answer from you.
+    Waiting,
+    Running,
+    Failed,
+    /// Its last run asks something you have seen, and not answered yet.
+    Seen,
+    /// Its time passed and it did not run: Claude Desktop was closed, say.
+    Late,
+    Done,
+    Never,
+    Paused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +263,7 @@ pub struct App {
     pub status: HashMap<PathBuf, GitState>,
     pub volume: Option<Volume>,
     pub sort: Sort,
+    pub group: Group,
     pub filter: String,
     pub mode: Mode,
     pub show_details: bool,
@@ -223,10 +295,23 @@ pub struct App {
     pub chosen: Option<(Agent, String)>,
     /// First row of the sessions list on screen.
     pub history_offset: usize,
+    /// The routines Claude Desktop runs on a schedule.
+    pub routines: Vec<Routine>,
+    /// Whether the first look for routines finished.
+    pub routines_found: bool,
+    /// The selected routine, by its key, so it stays selected as the list changes.
+    pub picked: Option<String>,
+    /// First row of the routines list on screen.
+    pub routines_offset: usize,
     pub clipboard: Clipboard,
+    pub opener: Opener,
+    pub launcher: Launcher,
+    /// The routine runs opened from grove.
+    pub seen: Seen,
     started: Instant,
     last_index: usize,
     history_index: usize,
+    routine_index: usize,
     /// Whether each conversation is the latest of its agent in its folder: the one an agent
     /// that does not say which it has open (Codex, OpenCode) is taken to have when it runs
     /// there.
@@ -244,6 +329,7 @@ impl App {
         roots: Vec<PathBuf>,
         workers: Workers,
     ) -> Self {
+        let seen = Seen::load(home.as_deref());
         Self {
             lang,
             text: lang.text(),
@@ -258,6 +344,7 @@ impl App {
             status: HashMap::new(),
             volume: None,
             sort: Sort::Activity,
+            group: Group::Project,
             filter: String::new(),
             mode: Mode::List,
             show_details: true,
@@ -277,10 +364,18 @@ impl App {
             history_found: false,
             chosen: None,
             history_offset: 0,
+            routines: Vec::new(),
+            routines_found: false,
+            picked: None,
+            routines_offset: 0,
             clipboard: Clipboard::System,
+            opener: Opener::System,
+            launcher: Launcher::System,
+            seen,
             started: Instant::now(),
             last_index: 0,
             history_index: 0,
+            routine_index: 0,
             newest: Vec::new(),
             gone: HashMap::new(),
             looked_in: Vec::new(),
@@ -295,6 +390,11 @@ impl App {
             Msg::Volume(volume) => self.volume = volume,
             Msg::Scan(scan) => self.on_scan(scan),
             Msg::History(history) => self.on_history(history),
+            Msg::Routines(routines) => {
+                self.routines = routines;
+                self.routines_found = true;
+                self.keep_selection();
+            }
             Msg::Measuring { path, bytes, files } => {
                 if let Some(size) = self.sizes.get_mut(&path) {
                     size.queued = false;
@@ -334,6 +434,7 @@ impl App {
     pub fn animating(&self) -> bool {
         !self.found
             || (self.view == View::Sessions && !self.history_found)
+            || (self.view == View::Routines && !self.routines_found)
             || !self.toasts.is_empty()
             || !self.removing.is_empty()
             || self.sizes.values().any(SizeState::busy)
@@ -618,8 +719,18 @@ impl App {
             || found(&conversation.cwd.to_string_lossy())
     }
 
-    /// The sessions list: the projects, the one with the latest conversation first, each
-    /// followed by its conversations, the open ones first and then the most recent.
+    /// What a conversation is grouped under: its repository, or the folder it works in.
+    pub fn group_of(&self, i: usize) -> &PathBuf {
+        let conversation = &self.history[i];
+        match self.group {
+            Group::Project => &conversation.project,
+            Group::Folder => &conversation.cwd,
+        }
+    }
+
+    /// The sessions list: the groups (projects or folders), the one with the latest
+    /// conversation first, each followed by its conversations, the open ones first and then
+    /// the most recent.
     pub fn rows(&self) -> Vec<Row> {
         let mut order: Vec<usize> = (0..self.history.len())
             .filter(|&i| self.shows(&self.history[i]))
@@ -629,7 +740,7 @@ impl App {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut group_of: HashMap<&PathBuf, usize> = HashMap::new();
         for i in order {
-            let group = *group_of.entry(&self.history[i].project).or_insert_with(|| {
+            let group = *group_of.entry(self.group_of(i)).or_insert_with(|| {
                 groups.push(Vec::new());
                 groups.len() - 1
             });
@@ -668,6 +779,148 @@ impl App {
         }
     }
 
+    /// The agent session running a routine's last run now, when one is.
+    pub fn routine_live(&self, i: usize) -> Option<&Session> {
+        let id = self.routines[i].run.as_ref()?.conversation.as_ref()?;
+        self.scan
+            .sessions
+            .iter()
+            .find(|session| session.conversation.as_ref() == Some(id))
+    }
+
+    /// When a routine was due and did not run, if that happened since its last run.
+    pub fn missed(&self, i: usize, now: DateTime<Local>) -> Option<DateTime<Local>> {
+        let routine = &self.routines[i];
+        if !routine.enabled {
+            return None;
+        }
+        let due = routine.schedule.as_ref()?.last_before(now)?;
+        if now.signed_duration_since(due) < LATE_AFTER {
+            return None;
+        }
+        // Not late for a time before it was made, nor when nothing says when it last ran.
+        let since = [routine.last_due, routine.last_run, routine.created]
+            .into_iter()
+            .flatten()
+            .max()?;
+        (since + DUE_SLACK < SystemTime::from(due)).then_some(due)
+    }
+
+    /// Where a routine stands: what the session of its last run does now, else what Claude
+    /// Desktop's summary of that run says, else whether it ran when due.
+    pub fn routine_state(&self, i: usize, now: DateTime<Local>) -> Due {
+        let routine = &self.routines[i];
+        let live = self.routine_live(i).map(|session| session.activity);
+        match live {
+            Some(Activity::Working) => return Due::Running,
+            Some(Activity::Blocked) => return Due::Waiting,
+            _ => {}
+        }
+        // Archived in Desktop, or answered in Claude Code since its summary: dealt with.
+        if let Some(run) = routine
+            .run
+            .as_ref()
+            .filter(|run| !run.archived && !run.answered)
+        {
+            if run.needs.is_some() || run.status.as_deref() == Some("blocked") {
+                // Open in a terminal now, opened from grove, or opened in Desktop once it
+                // stopped: you have seen what it asks.
+                let seen = live.is_some()
+                    || self.seen.has(run)
+                    || run
+                        .focused
+                        .zip(run.active)
+                        .is_some_and(|(focused, active)| focused + FOCUS_SLACK >= active);
+                return if seen { Due::Seen } else { Due::Waiting };
+            }
+            if run.error.is_some() || matches!(run.status.as_deref(), Some("failed" | "error")) {
+                return Due::Failed;
+            }
+        }
+        if !routine.enabled {
+            Due::Paused
+        } else if self.missed(i, now).is_some() {
+            Due::Late
+        } else if routine.run.is_some() || routine.last_run.is_some() {
+            Due::Done
+        } else {
+            Due::Never
+        }
+    }
+
+    /// When a routine runs next; never for a paused one.
+    pub fn next_run(&self, i: usize, now: DateTime<Local>) -> Option<DateTime<Local>> {
+        let routine = &self.routines[i];
+        routine
+            .schedule
+            .as_ref()
+            .filter(|_| routine.enabled)?
+            .next_after(now)
+    }
+
+    fn shows_routine(&self, routine: &Routine) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        let needle = self.filter.to_lowercase();
+        let found = |text: &str| text.to_lowercase().contains(&needle);
+        let run = routine.run.as_ref();
+        [
+            Some(routine.name.as_str()),
+            Some(routine.id.as_str()),
+            routine.description.as_deref(),
+            run.and_then(|run| run.detail.as_deref()),
+            run.and_then(|run| run.needs.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(found)
+    }
+
+    /// The routines list: the ones waiting for you first, then by what is most pressing, and
+    /// among equals the one that runs soonest.
+    pub fn routine_rows(&self) -> Vec<usize> {
+        let now = Local::now();
+        let mut rows: Vec<usize> = (0..self.routines.len())
+            .filter(|&i| self.shows_routine(&self.routines[i]))
+            .collect();
+        rows.sort_by_cached_key(|&i| {
+            (
+                self.routine_state(i, now),
+                self.next_run(i, now).is_none(),
+                self.next_run(i, now),
+                self.routines[i].name.to_lowercase(),
+            )
+        });
+        rows
+    }
+
+    /// How many routines wait for you.
+    pub fn routines_waiting(&self) -> usize {
+        let now = Local::now();
+        (0..self.routines.len())
+            .filter(|&i| self.routine_state(i, now) == Due::Waiting)
+            .count()
+    }
+
+    pub fn picked_index(&self, rows: &[usize]) -> Option<usize> {
+        let key = self.picked.as_ref()?;
+        rows.iter().position(|&i| self.routines[i].key == *key)
+    }
+
+    /// The selected routine, when it is on the list.
+    pub fn picked_routine(&self) -> Option<usize> {
+        let rows = self.routine_rows();
+        rows.get(self.picked_index(&rows)?).copied()
+    }
+
+    fn pick(&mut self, rows: &[usize], index: usize) {
+        if let Some(&i) = rows.get(index) {
+            self.picked = Some(self.routines[i].key.clone());
+            self.routine_index = index;
+        }
+    }
+
     /// Keeps each list's selection on a row still listed, or the one now where it was.
     pub fn keep_selection(&mut self) {
         let items = self.items();
@@ -681,6 +934,12 @@ impl App {
         match settle(self.chosen_index(&rows), &conversations, self.history_index) {
             Some(index) => self.choose(&rows, index),
             None => self.chosen = None,
+        }
+        let routines = self.routine_rows();
+        let every: Vec<usize> = (0..routines.len()).collect();
+        match settle(self.picked_index(&routines), &every, self.routine_index) {
+            Some(index) => self.pick(&routines, index),
+            None => self.picked = None,
         }
     }
 
@@ -700,12 +959,146 @@ impl App {
                     self.choose(&rows, index);
                 }
             }
+            View::Routines => {
+                let rows = self.routine_rows();
+                let every: Vec<usize> = (0..rows.len()).collect();
+                if let Some(index) = step(self.picked_index(&rows), &every, delta) {
+                    self.pick(&rows, index);
+                }
+            }
+        }
+    }
+
+    /// Picks the selected conversation or routine run up again: copies the command that
+    /// resumes a conversation, and opens a routine's run in Claude Code beside grove.
+    fn resume(&mut self) {
+        match self.view {
+            View::Routines => self.open_here(),
+            _ => self.copy_conversation_command(),
+        }
+    }
+
+    /// Keeps the last run of routine `i` as seen, at its current turn.
+    fn mark_seen(&mut self, i: usize) {
+        let Some(run) = self.routines[i].run.clone() else {
+            return;
+        };
+        let sessions: Vec<String> = self
+            .routines
+            .iter()
+            .filter_map(|routine| routine.run.as_ref().map(|run| run.session.clone()))
+            .collect();
+        self.seen.mark(&run, sessions.iter().map(String::as_str));
+    }
+
+    /// Opens the last run of the selected routine in Claude Code, in a new tab of the herdr
+    /// (or window of the tmux) grove runs in, to answer or approve it there; elsewhere,
+    /// copies the command that does it.
+    fn open_here(&mut self) {
+        let Some(i) = self.picked_routine() else {
+            return;
+        };
+        let routine = &self.routines[i];
+        let Some(run) = &routine.run else {
+            self.toast(ToastKind::Info, self.text.never_ran.to_string());
+            return;
+        };
+        let Some(conversation) = run.conversation.clone() else {
+            self.copy_routine_command();
+            return;
+        };
+        let job = Launch {
+            name: routine.name.clone(),
+            agent: routine.id.clone(),
+            dir: run.cwd.clone().or_else(|| routine.cwd.clone()),
+            conversation,
+        };
+        match self.launcher.launch(&job) {
+            Ok(place) => {
+                self.mark_seen(i);
+                let text = match place {
+                    Place::Herdr => self.text.opened_herdr,
+                    Place::Tmux => self.text.opened_tmux,
+                };
+                self.toast(ToastKind::Ok, text.replace("{name}", &job.name));
+            }
+            Err(error) => {
+                if self.copy_routine_command() {
+                    let note = if error.is_empty() {
+                        self.text.no_multiplexer.to_string()
+                    } else {
+                        error
+                    };
+                    self.toast(ToastKind::Info, note);
+                }
+            }
+        }
+    }
+
+    /// Opens the last run of the selected routine in Claude Desktop, where it is answered or
+    /// approved; when that cannot be (over SSH, say), copies the command that resumes it in a
+    /// terminal instead.
+    fn open_routine(&mut self) {
+        let Some(i) = self.picked_routine() else {
+            return;
+        };
+        let routine = &self.routines[i];
+        let name = routine.name.clone();
+        let Some(link) = routines::desktop_link(routine) else {
+            self.copy_routine_command();
+            return;
+        };
+        let opened = if opener::remote() && matches!(self.opener, Opener::System) {
+            Err(self.text.open_remote.to_string())
+        } else {
+            self.opener.open(&link)
+        };
+        match opened {
+            Ok(()) => {
+                self.mark_seen(i);
+                self.toast(ToastKind::Ok, self.text.opened.replace("{name}", &name));
+            }
+            Err(error) => {
+                if self.copy_routine_command() {
+                    let text = format!("{}: {error}", self.text.open_failed);
+                    self.toast(ToastKind::Info, text);
+                }
+            }
+        }
+    }
+
+    /// Copies the command that resumes the last run of the selected routine.
+    fn copy_routine_command(&mut self) -> bool {
+        let Some(i) = self.picked_routine() else {
+            return false;
+        };
+        let Some(command) = routines::command(&self.routines[i], self.home.as_deref()) else {
+            self.toast(ToastKind::Info, self.text.never_ran.to_string());
+            return false;
+        };
+        self.copy(&command)
+    }
+
+    fn copy(&mut self, command: &str) -> bool {
+        match self.clipboard.copy(command) {
+            Ok(()) => {
+                self.toast(
+                    ToastKind::Ok,
+                    self.text.copied.replace("{command}", command),
+                );
+                true
+            }
+            Err(error) => {
+                let text = format!("{}: {error}", self.text.copy_failed);
+                self.toast(ToastKind::Error, text);
+                false
+            }
         }
     }
 
     /// Copies the command that picks the selected conversation up again, to paste in a
     /// terminal.
-    fn copy_command(&mut self) {
+    fn copy_conversation_command(&mut self) {
         let Some(i) = self.chosen_conversation() else {
             return;
         };
@@ -723,20 +1116,10 @@ impl App {
             None if conversation.stranded => Some(self.text.folder_gone.to_string()),
             None => None,
         };
-        match self.clipboard.copy(&command) {
-            Ok(()) => {
-                self.toast(
-                    ToastKind::Ok,
-                    self.text.copied.replace("{command}", &command),
-                );
-                if let Some(note) = note {
-                    self.toast(ToastKind::Info, note);
-                }
-            }
-            Err(error) => {
-                let text = format!("{}: {error}", self.text.copy_failed);
-                self.toast(ToastKind::Error, text);
-            }
+        if self.copy(&command)
+            && let Some(note) = note
+        {
+            self.toast(ToastKind::Info, note);
         }
     }
 
@@ -775,9 +1158,16 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.move_by(isize::MIN),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX),
             // The lists sit side by side, like their tabs on top.
-            KeyCode::Left | KeyCode::Char('h') => self.view = View::Worktrees,
-            KeyCode::Right | KeyCode::Char('l') => self.view = View::Sessions,
-            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Left | KeyCode::Char('h') => self.view = self.view.left(),
+            KeyCode::Right | KeyCode::Char('l') => self.view = self.view.right(),
+            KeyCode::Char('1') => self.view = View::Worktrees,
+            KeyCode::Char('2') => self.view = View::Sessions,
+            KeyCode::Char('3' | 't') => self.view = View::Routines,
+            KeyCode::Enter if !worktrees => self.resume(),
+            KeyCode::Char('c') if self.view == View::Routines => {
+                self.copy_routine_command();
+            }
+            KeyCode::Char('o') if self.view == View::Routines => self.open_routine(),
             KeyCode::Enter | KeyCode::Char('i') => self.toggle_details(),
             KeyCode::Char('d') | KeyCode::Delete if worktrees => self.ask_removal(),
             KeyCode::Char('D') if worktrees => self.ask_idle_removal(),
@@ -787,6 +1177,7 @@ impl App {
                 self.mode = Mode::Filter;
             }
             KeyCode::Char('s') if worktrees => self.sort = self.sort.next(),
+            KeyCode::Char('s') if self.view == View::Sessions => self.group = self.group.next(),
             KeyCode::Char('r') => self.refresh(false),
             KeyCode::Char('R') => self.refresh(true),
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -818,7 +1209,11 @@ impl App {
     fn on_details_key(&mut self, key: KeyEvent) {
         let worktrees = self.view == View::Worktrees;
         match key.code {
-            KeyCode::Enter if !worktrees => self.copy_command(),
+            KeyCode::Enter if !worktrees => self.resume(),
+            KeyCode::Char('c') if self.view == View::Routines => {
+                self.copy_routine_command();
+            }
+            KeyCode::Char('o') if self.view == View::Routines => self.open_routine(),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h' | 'i' | 'q') => {
                 self.mode = Mode::List;
             }
@@ -864,9 +1259,17 @@ impl App {
                     View::Sessions => {
                         let rows = self.rows();
                         if self.chosen_index(&rows) == Some(index) {
-                            self.copy_command();
+                            self.resume();
                         } else {
                             self.choose(&rows, index);
+                        }
+                    }
+                    View::Routines => {
+                        let rows = self.routine_rows();
+                        if self.picked_index(&rows) == Some(index) {
+                            self.resume();
+                        } else {
+                            self.pick(&rows, index);
                         }
                     }
                 }
@@ -879,6 +1282,7 @@ impl App {
         let chosen = match self.view {
             View::Worktrees => self.selected.is_some(),
             View::Sessions => self.chosen.is_some(),
+            View::Routines => self.picked.is_some(),
         };
         if self.details_room {
             self.show_details = !self.show_details;
@@ -1188,6 +1592,9 @@ impl App {
     pub fn with_data(repos: Vec<Repo>, scan: Scan) -> Self {
         let mut app = App::new(Lang::En, Theme::rgb(), None, Vec::new(), Workers::idle());
         app.clipboard = Clipboard::Memory(Vec::new());
+        app.opener = Opener::Memory(Vec::new());
+        app.launcher = Launcher::Memory(Vec::new());
+        app.seen = Seen::default();
         app.handle(Msg::Repos(repos));
         app.handle(Msg::Scan(scan));
         app
@@ -1489,7 +1896,7 @@ mod tests {
     const PLAN: &str = "run terraform plan for the dns module and explain the diff";
 
     #[test]
-    fn arrows_go_between_worktrees_and_sessions() {
+    fn arrows_go_between_worktrees_sessions_and_routines() {
         let mut app = demo::app();
         let key = |app: &mut App, code| app.on_key(KeyEvent::from(code));
         assert_eq!(app.view, View::Worktrees);
@@ -1498,17 +1905,34 @@ mod tests {
         key(&mut app, KeyCode::Right);
         assert_eq!(app.view, View::Sessions);
         key(&mut app, KeyCode::Right);
-        assert_eq!(app.view, View::Sessions, "nor further right");
-        // What removes worktrees does nothing among the sessions.
-        key(&mut app, KeyCode::Char('D'));
-        key(&mut app, KeyCode::Char('d'));
-        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.view, View::Routines);
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.view, View::Routines, "nor further right");
+        // What removes worktrees does nothing among the sessions or the routines.
+        for view in [View::Sessions, View::Routines] {
+            app.view = view;
+            key(&mut app, KeyCode::Char('D'));
+            key(&mut app, KeyCode::Char('d'));
+            assert!(matches!(app.mode, Mode::List));
+        }
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.view, View::Sessions);
         key(&mut app, KeyCode::Char('h'));
         assert_eq!(app.view, View::Worktrees);
         key(&mut app, KeyCode::Char('l'));
         assert_eq!(app.view, View::Sessions);
         key(&mut app, KeyCode::Left);
         assert_eq!(app.view, View::Worktrees);
+        // Straight to a list, from any of them.
+        key(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.view, View::Routines);
+        key(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.view, View::Worktrees);
+        key(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.view, View::Routines);
+        key(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.view, View::Sessions);
+        key(&mut app, KeyCode::Char('1'));
         // Enter still shows the details of a worktree, and `i` too.
         let shown = app.show_details;
         key(&mut app, KeyCode::Enter);
@@ -1545,6 +1969,48 @@ mod tests {
                 "sketch the pricing page",
             ]
         );
+    }
+
+    #[test]
+    fn s_groups_the_sessions_by_folder() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        let headings = |app: &App| {
+            app.rows()
+                .iter()
+                .filter(|row| matches!(row, Row::Project(_)))
+                .count()
+        };
+        let by_project = headings(&app);
+        let sort = app.sort;
+        app.on_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.group, Group::Folder);
+        assert_eq!(app.sort, sort, "the worktrees keep their order");
+        // Each group holds the conversations of one folder, so a project splits.
+        let rows = app.rows();
+        let mut folder = None;
+        for row in &rows {
+            match *row {
+                Row::Project(first) => folder = Some(app.history[first].cwd.clone()),
+                Row::Conversation(i) => assert_eq!(Some(&app.history[i].cwd), folder.as_ref()),
+            }
+        }
+        assert!(headings(&app) > by_project, "{rows:?}");
+        let tools = |app: &App| {
+            app.rows()
+                .iter()
+                .filter(
+                    |row| matches!(row, Row::Project(i) if app.history[*i].project_name == "tools"),
+                )
+                .count()
+        };
+        assert!(tools(&app) > 1, "tools and tools-dns apart");
+        let screen = crate::ui::tests::text(&crate::ui::tests::draw(&mut app, 160, 40));
+        assert!(screen.contains("s group: folder"), "{screen}");
+        assert!(screen.contains("~/Workspace/tools-dns"), "{screen}");
+        app.on_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.group, Group::Project);
+        assert_eq!(headings(&app), by_project);
     }
 
     #[test]
@@ -1668,6 +2134,207 @@ mod tests {
             app.history[i].agent,
             Agent::OpenCode,
             "the selection follows"
+        );
+    }
+
+    fn routine_ids(app: &App) -> Vec<&str> {
+        app.routine_rows()
+            .into_iter()
+            .map(|i| app.routines[i].id.as_str())
+            .collect()
+    }
+
+    fn routine(app: &App, id: &str) -> usize {
+        app.routines
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap_or_else(|| panic!("no routine {id:?}"))
+    }
+
+    #[test]
+    fn lists_the_routines_waiting_for_you_first() {
+        let app = demo::app();
+        assert_eq!(
+            routine_ids(&app),
+            [
+                "release-notes",
+                "nightly-bench",
+                "dependency-audit",
+                "weekly-digest",
+                "standup-summary",
+                "inbox-triage",
+                "cleanup-branches",
+            ]
+        );
+        let now = Local::now();
+        let states: Vec<Due> = app
+            .routine_rows()
+            .into_iter()
+            .map(|i| app.routine_state(i, now))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                Due::Waiting,
+                Due::Running,
+                Due::Failed,
+                Due::Late,
+                Due::Done,
+                Due::Never,
+                Due::Paused,
+            ]
+        );
+        assert_eq!(app.routines_waiting(), 1);
+        // The session working in archive-cards is the run of nightly-bench.
+        let bench = routine(&app, "nightly-bench");
+        assert_eq!(app.routine_live(bench).map(|s| s.pid), Some(54795));
+        assert!(app.missed(routine(&app, "weekly-digest"), now).is_some());
+        assert!(
+            app.missed(routine(&app, "inbox-triage"), now).is_none(),
+            "made after it was due"
+        );
+        assert!(
+            app.next_run(routine(&app, "cleanup-branches"), now)
+                .is_none(),
+            "paused"
+        );
+        assert!(
+            app.next_run(routine(&app, "standup-summary"), now)
+                .is_some_and(|next| next > now)
+        );
+    }
+
+    #[test]
+    fn a_run_opened_in_desktop_is_seen_until_it_asks_again() {
+        let mut app = demo::app();
+        let notes = routine(&app, "release-notes");
+        let now = Local::now();
+        let run = app.routines[notes].run.as_mut().unwrap();
+        let active = run.active.unwrap();
+        // Opened before it ran: what it asks came after.
+        run.focused = Some(active - Duration::from_secs(30 * 60));
+        assert_eq!(app.routine_state(notes, now), Due::Waiting);
+        // You were on it as it stopped, or opened it after.
+        for focused in [
+            active - Duration::from_secs(60),
+            active + Duration::from_secs(3600),
+        ] {
+            app.routines[notes].run.as_mut().unwrap().focused = Some(focused);
+            assert_eq!(app.routine_state(notes, now), Due::Seen);
+        }
+        assert_eq!(app.routines_waiting(), 0);
+        // A new turn asking again waits again.
+        let run = app.routines[notes].run.as_mut().unwrap();
+        run.active = Some(active + Duration::from_secs(2 * 3600));
+        assert_eq!(app.routine_state(notes, now), Due::Waiting);
+    }
+
+    #[test]
+    fn a_routine_waits_until_its_run_is_dealt_with() {
+        let mut app = demo::app();
+        let notes = routine(&app, "release-notes");
+        let now = Local::now();
+        app.routines[notes].run.as_mut().unwrap().archived = true;
+        assert_eq!(
+            app.routine_state(notes, now),
+            Due::Done,
+            "archived in Desktop"
+        );
+        assert_eq!(app.routines_waiting(), 0);
+        // A session asking something in a terminal waits too, whatever Desktop wrote.
+        let bench = routine(&app, "nightly-bench");
+        app.scan
+            .sessions
+            .iter_mut()
+            .find(|s| s.pid == 54795)
+            .unwrap()
+            .activity = Activity::Blocked;
+        assert_eq!(app.routine_state(bench, now), Due::Waiting);
+        // Paused, a routine still waits for an answer to its last run.
+        app.routines[bench].enabled = false;
+        assert_eq!(app.routine_state(bench, now), Due::Waiting);
+        app.scan.sessions.retain(|s| s.pid != 54795);
+        assert_eq!(app.routine_state(bench, now), Due::Paused);
+    }
+
+    #[test]
+    fn enter_opens_a_routine_run_in_claude_code_beside_grove() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            app.launcher.last(),
+            Some(&Launch {
+                name: "Release notes".into(),
+                agent: "release-notes".into(),
+                dir: Some(PathBuf::from("/Users/me/Workspace/shop")),
+                conversation: "a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01".into(),
+            })
+        );
+        assert_eq!(
+            app.toasts[0].text,
+            "Opening in Claude Code, in a new herdr tab: Release notes"
+        );
+        assert_eq!(app.opener.last(), None, "not in Desktop");
+        // Seen once opened: it stops waiting, though it still asks.
+        let notes = routine(&app, "release-notes");
+        assert_eq!(app.routine_state(notes, Local::now()), Due::Seen);
+        assert_eq!(app.routines_waiting(), 0);
+        // Answered there, it no longer waits, whatever Desktop's summary says.
+        app.routines[notes].run.as_mut().unwrap().answered = true;
+        assert_eq!(app.routine_state(notes, Local::now()), Due::Done);
+        assert_eq!(app.routines_waiting(), 0);
+    }
+
+    #[test]
+    fn o_opens_a_routine_run_in_desktop_and_c_copies_its_command() {
+        let mut app = demo::app();
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        app.on_key(KeyEvent::from(KeyCode::Char('o')));
+        assert_eq!(
+            app.opener.last(),
+            Some("claude://code/continue?session=local_a1b2c3d4"),
+            "the first one, waiting for you"
+        );
+        assert_eq!(
+            app.toasts[0].text,
+            "Opened in Claude Desktop: Release notes"
+        );
+        assert_eq!(app.clipboard.last(), None, "nothing copied");
+        app.on_key(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(
+            app.clipboard.last(),
+            Some("cd ~/Workspace/shop && claude --resume a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01")
+        );
+        // One that never ran has nothing to open.
+        app.picked = Some(app.routines[routine(&app, "inbox-triage")].key.clone());
+        app.toasts.clear();
+        app.on_key(KeyEvent::from(KeyCode::Char('o')));
+        assert_eq!(app.toasts[0].text, "It has not run yet");
+        app.toasts.clear();
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.toasts[0].text, "It has not run yet");
+        assert_eq!(
+            app.opener.last(),
+            Some("claude://code/continue?session=local_a1b2c3d4")
+        );
+    }
+
+    #[test]
+    fn the_filter_finds_routines_by_what_they_ask() {
+        let mut app = demo::app();
+        app.view = View::Routines;
+        app.filter = "last pr".into();
+        assert_eq!(routine_ids(&app), ["release-notes"]);
+        app.filter = "DIGEST".into();
+        assert_eq!(routine_ids(&app), ["weekly-digest"]);
+        app.keep_selection();
+        assert_eq!(app.picked_routine(), Some(routine(&app, "weekly-digest")));
+        app.move_by(1);
+        assert_eq!(
+            app.picked_routine(),
+            Some(routine(&app, "weekly-digest")),
+            "the only one"
         );
     }
 

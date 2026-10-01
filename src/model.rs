@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::cron::Cron;
+
 /// A coding agent grove recognizes by its process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Agent {
@@ -203,6 +205,60 @@ impl Repo {
     pub fn linked(&self) -> usize {
         self.worktrees.iter().filter(|w| !w.main).count()
     }
+}
+
+/// A routine Claude Desktop runs on a schedule: what its `scheduled-tasks.json` says about
+/// it, and its latest run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Routine {
+    /// Its id with the folder of the organization that keeps it, so two organizations'
+    /// routines never mix.
+    pub key: String,
+    pub id: String,
+    /// The name Desktop shows, else its id.
+    pub name: String,
+    /// The `description` of its prompt file.
+    pub description: Option<String>,
+    pub cron: String,
+    pub schedule: Option<Cron>,
+    pub enabled: bool,
+    /// Where it runs.
+    pub cwd: Option<PathBuf>,
+    /// The file with its prompt.
+    pub prompt: Option<PathBuf>,
+    pub created: Option<SystemTime>,
+    /// When its last run started, and the time that run was due.
+    pub last_run: Option<SystemTime>,
+    pub last_due: Option<SystemTime>,
+    pub run: Option<Run>,
+}
+
+/// One run of a routine: the Desktop session it opened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    /// The Desktop session, `local_…`.
+    pub session: String,
+    /// The Claude Code conversation under it, which `claude --resume` takes.
+    pub conversation: Option<String>,
+    pub title: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub started: Option<SystemTime>,
+    pub active: Option<SystemTime>,
+    /// What Desktop's summary of its last turn says: `blocked`, `completed`…
+    pub status: Option<String>,
+    pub detail: Option<String>,
+    /// What it waits for from you, when it does.
+    pub needs: Option<String>,
+    pub error: Option<String>,
+    /// Archived in Desktop: dealt with.
+    pub archived: bool,
+    /// When you last opened it in Desktop.
+    pub focused: Option<SystemTime>,
+    /// The message Desktop's summary is about.
+    pub summary_for: Option<String>,
+    /// Set when the conversation went on after that message, answered in Claude Code say:
+    /// Desktop writes its summary only for what it runs itself, so it is out of date.
+    pub answered: bool,
 }
 
 /// The name a worktree is shown by: its folder, or the repository's name for the main one.

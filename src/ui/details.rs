@@ -79,6 +79,18 @@ pub(super) fn panel(
     label: &str,
 ) -> Rect {
     let (symbol, color) = state_symbol(app, state);
+    marked_panel(buf, area, app, name, (symbol, color), label)
+}
+
+/// A panel with any symbol and color for the state.
+pub(super) fn marked_panel(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    name: &str,
+    (symbol, color): (&str, Color),
+    label: &str,
+) -> Rect {
     let label = format!(" {symbol} {label} ");
     let room = usize::from(area.width).saturating_sub(label.width() + 6);
     let block = Block::bordered()

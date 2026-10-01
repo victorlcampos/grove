@@ -1,5 +1,5 @@
 //! Background threads: repository discovery, process scans, the conversations agents keep,
-//! disk measurement, git status and removal. They report back to the interface through one
+//! Claude Desktop's routines, disk measurement, git status and removal. They report back to the interface through one
 //! channel.
 
 use std::collections::{HashSet, VecDeque};
@@ -17,11 +17,13 @@ use crate::discover::Finder;
 use crate::du::{self, Progress, Usage, Volume};
 use crate::git::{self, Force};
 use crate::history::History;
-use crate::model::{Conversation, Repo, Scan};
+use crate::model::{Conversation, Repo, Routine, Scan};
+use crate::routines::Desktop;
 
 const FIND_EVERY: Duration = Duration::from_secs(10);
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const HISTORY_EVERY: Duration = Duration::from_secs(5);
+const ROUTINES_EVERY: Duration = Duration::from_secs(5);
 const ANSWER_EVERY: Duration = Duration::from_millis(250);
 const PROGRESS_EVERY: Duration = Duration::from_millis(120);
 /// Removals and status checks run a few at a time: each waits mostly on the disk.
@@ -34,6 +36,7 @@ pub enum Msg {
     Volume(Option<Volume>),
     Scan(Scan),
     History(Vec<Conversation>),
+    Routines(Vec<Routine>),
     Measuring {
         path: PathBuf,
         bytes: u64,
@@ -81,6 +84,7 @@ pub struct Workers {
     find: Sender<Find>,
     scan: Sender<()>,
     history: Sender<()>,
+    routines: Sender<()>,
     size: Sender<SizeJob>,
     status: Sender<(PathBuf, bool)>,
     remove: Sender<RemoveJob>,
@@ -91,6 +95,7 @@ impl Workers {
         let (find, find_rx) = mpsc::channel();
         let (scan, scan_rx) = mpsc::channel();
         let (history, history_rx) = mpsc::channel();
+        let (routines, routines_rx) = mpsc::channel();
         let (size, size_rx) = mpsc::channel();
         let (status, status_rx) = mpsc::channel();
         let (remove, remove_rx) = mpsc::channel();
@@ -111,6 +116,11 @@ impl Workers {
             let history = History::new(home.as_deref());
             move || history_loop(history, &history_rx, &tx)
         });
+        spawn("grove-routines", {
+            let tx = tx.clone();
+            let desktop = Desktop::new(home.as_deref());
+            move || routines_loop(desktop, &routines_rx, &tx)
+        });
         spawn("grove-scan", {
             let tx = tx.clone();
             move || scan_loop(home.as_deref(), &scan_rx, &tx)
@@ -124,6 +134,7 @@ impl Workers {
             find,
             scan,
             history,
+            routines,
             size,
             status,
             remove,
@@ -136,6 +147,7 @@ impl Workers {
         let (find, _) = mpsc::channel();
         let (scan, _) = mpsc::channel();
         let (history, _) = mpsc::channel();
+        let (routines, _) = mpsc::channel();
         let (size, _) = mpsc::channel();
         let (status, _) = mpsc::channel();
         let (remove, _) = mpsc::channel();
@@ -143,6 +155,7 @@ impl Workers {
             find,
             scan,
             history,
+            routines,
             size,
             status,
             remove,
@@ -153,6 +166,7 @@ impl Workers {
         let _ = self.find.send(Find::Now);
         let _ = self.scan.send(());
         let _ = self.history.send(());
+        let _ = self.routines.send(());
     }
 
     /// Folders where agents run, so their repositories are listed even without worktrees.
@@ -254,6 +268,24 @@ fn history_loop(mut history: History, rx: &Receiver<()>, tx: &Sender<Msg>) {
             Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => return,
         };
+    }
+}
+
+/// Reads Claude Desktop's routines, reporting them when they change.
+fn routines_loop(mut desktop: Desktop, rx: &Receiver<()>, tx: &Sender<Msg>) {
+    let mut sent: Option<Vec<Routine>> = None;
+    loop {
+        let found = desktop.load();
+        if sent.as_ref() != Some(&found) {
+            if tx.send(Msg::Routines(found.clone())).is_err() {
+                return;
+            }
+            sent = Some(found);
+        }
+        match rx.recv_timeout(ROUTINES_EVERY) {
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 

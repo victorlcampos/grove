@@ -11,6 +11,7 @@ keywords = ["git", "worktree", "tui", "claude", "disk-usage"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 rayon = "1.12"

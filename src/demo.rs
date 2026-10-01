@@ -1,14 +1,19 @@
 //! A made-up computer for tests and screenshots: three repositories with worktrees in every
-//! state, Claude Code, Codex and OpenCode sessions in them, and the conversations those agents
-//! keep.
+//! state, Claude Code, Codex and OpenCode sessions in them, the conversations those agents
+//! keep, and Claude Desktop routines in every state.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use chrono::{Local, Timelike};
+
 use crate::app::App;
+use crate::cron::Cron;
 use crate::du::Volume;
 use crate::git::{Commit, Status};
-use crate::model::{Activity, Agent, Conversation, Proc, Repo, Running, Scan, Session, Worktree};
+use crate::model::{
+    Activity, Agent, Conversation, Proc, Repo, Routine, Run, Running, Scan, Session, Worktree,
+};
 use crate::worker::Msg;
 
 const DAY: u64 = 86_400;
@@ -459,10 +464,126 @@ fn status(changed: u32, untracked: u32, ahead: u32, subject: &str, hours: u64) -
     }
 }
 
+fn routine(id: &str, name: Option<&str>, cron: &str, cwd: &str) -> Routine {
+    Routine {
+        key: format!("/Users/me/Library/Application Support/Claude/org/{id}"),
+        id: id.into(),
+        name: name.unwrap_or(id).into(),
+        description: None,
+        cron: cron.into(),
+        schedule: Cron::parse(cron),
+        enabled: true,
+        cwd: Some(PathBuf::from(cwd)),
+        prompt: Some(PathBuf::from(format!(
+            "/Users/me/.claude/scheduled-tasks/{id}/SKILL.md"
+        ))),
+        created: Some(ago(30 * DAY)),
+        last_run: None,
+        last_due: None,
+        run: None,
+    }
+}
+
+fn run(id: &str, title: &str, cwd: &str, minutes: u64) -> Run {
+    Run {
+        session: format!("local_{id}"),
+        conversation: Some(format!("{id}-7d1c-4e2a-9b3f-5a6c7d8e9f01")),
+        title: Some(title.into()),
+        cwd: Some(PathBuf::from(cwd)),
+        started: Some(ago(minutes * 60)),
+        active: Some(ago(minutes * 60 - 30)),
+        status: Some("completed".into()),
+        detail: None,
+        needs: None,
+        error: None,
+        archived: false,
+        focused: None,
+        summary_for: None,
+        answered: false,
+    }
+}
+
+/// Routines in every state: waiting for an answer, running now, failed, late, done, never
+/// run and paused. Their times follow the clock, so each one is in its state whenever the
+/// tests run.
+pub fn routines() -> Vec<Routine> {
+    let now = Local::now();
+    // Runs when it was last due, so it is not late.
+    let ran_when_due = |routine: &mut Routine, run: Run| {
+        let due = routine
+            .schedule
+            .as_ref()
+            .and_then(|cron| cron.last_before(now));
+        routine.last_due = due.map(SystemTime::from);
+        routine.last_run = routine.last_due.map(|due| due + Duration::from_secs(40));
+        routine.run = Some(run);
+    };
+
+    let mut notes = routine("release-notes", Some("Release notes"), "0 9 * * 1-5", SHOP);
+    let mut waiting = run("a1b2c3d4", "Release notes for v2.4", SHOP, 50);
+    waiting.status = Some("blocked".into());
+    waiting.needs =
+        Some("Publish the notes for v2.4 now, or wait for the last PR to merge?".into());
+    waiting.detail = waiting.needs.clone();
+    notes.description =
+        Some("Weekdays 09:00 — drafts the release notes from the merged PRs".into());
+    ran_when_due(&mut notes, waiting);
+
+    let mut bench = routine(
+        "nightly-bench",
+        None,
+        "30 2 * * *",
+        &wt(BOARD, "archive-cards"),
+    );
+    let mut running = run("b2c3d4e5", "Nightly bench", BOARD, 23);
+    // The Claude Code session working in archive-cards is this run.
+    running.conversation = Some(conversation_id(54795));
+    running.status = None;
+    ran_when_due(&mut bench, running);
+
+    let mut audit = routine("dependency-audit", None, "0 8 * * 1", SHOP);
+    let mut failed = run("c3d4e5f6", "Dependency audit", SHOP, 3 * 60);
+    failed.status = None;
+    failed.error = Some("The github MCP server did not start".into());
+    ran_when_due(&mut audit, failed);
+
+    // Due every hour, half an hour from the current minute: it was due half an hour ago and
+    // last ran three days ago.
+    let minute = (now.minute() + 30) % 60;
+    let mut digest = routine(
+        "weekly-digest",
+        Some("Weekly digest"),
+        &format!("{minute} * * * *"),
+        TOOLS,
+    );
+    digest.last_due = Some(ago(3 * DAY));
+    digest.last_run = Some(ago(3 * DAY - 50));
+    digest.run = Some(run("d4e5f6a7", "Weekly digest", TOOLS, 3 * 24 * 60));
+
+    let mut standup = routine(
+        "standup-summary",
+        Some("Standup summary"),
+        "45 9 * * 1-5",
+        BOARD,
+    );
+    let mut done = run("e5f6a7b8", "Standup summary", BOARD, 5 * 60);
+    done.detail = Some("posted the summary in #team".into());
+    ran_when_due(&mut standup, done);
+
+    let mut inbox = routine("inbox-triage", None, "15 7 * * *", TOOLS);
+    inbox.created = Some(SystemTime::now());
+
+    let mut cleanup = routine("cleanup-branches", None, "0 18 * * 5", SHOP);
+    cleanup.enabled = false;
+
+    vec![cleanup, standup, inbox, digest, audit, bench, notes]
+}
+
 /// The made-up computer with every worktree measured and checked.
 pub fn app() -> App {
     let mut app = App::with_data(repos(), scan());
     app.handle(Msg::History(history()));
+    app.handle(Msg::Routines(routines()));
     app.home = Some(PathBuf::from("/Users/me"));
     app.volume = Some(Volume {
         free: 312_400_000_000,

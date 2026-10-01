@@ -297,7 +297,7 @@ pub fn command(conversation: &Conversation, live: Option<&Session>, home: Option
 
 /// A folder as a shell word, with `~` for the home folder where shells expand it (bash, zsh,
 /// fish, PowerShell), outside the quotes. Windows paths take `/`, which its shells take too.
-fn shell_path(path: &Path, home: Option<&Path>) -> String {
+pub(crate) fn shell_path(path: &Path, home: Option<&Path>) -> String {
     let word = |path: &Path| {
         let text = path.to_string_lossy();
         if cfg!(windows) {

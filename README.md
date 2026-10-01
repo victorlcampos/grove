@@ -5,11 +5,13 @@ OpenCode session is working in, how much disk each one takes, and a key to
 remove the ones you are done with, or all the idle ones at once, with
 `git worktree remove`. A second list, a `→` away, has every conversation
 those agents keep, the ones `claude --resume` offers and Codex's and
-OpenCode's too, and copies the command that picks one up again. Built for
+OpenCode's too, and copies the command that picks one up again. A third,
+`t`, has the routines Claude Desktop runs on a schedule: which ones wait for
+you and what they ask, which did not run, and when each one runs next. Built for
 tiling window managers: resize the pane and the layout follows.
 
 ```text
- grove   15 worktrees  15 sessions  ◆ 2 waiting for you  ⠸ 4 working  ● 3 idle  Σ 27.2 GB  disk █████▌·· 312 GB free
+ grove   15 worktrees  15 ses  7 rtn  ◆ 1 routine waiting  ◆ 2 waiting for you  ⠸ 4 working  ●3  27G  312 GB free
 
  board  ~/Workspace/board ───────────────────────────────────────────────────────────────────── 4 worktrees · 3.2 GB
  ● board main              ✓          ✻ claude  board-ui                                      1.4 GB ████▋·····    1h
@@ -32,7 +34,10 @@ tiling window managers: resize the pane and the layout follows.
  ⠸ tools-dns               ✓          ❯ codex  pid 81234 · 38% cpu                           41.0 MB ▏·········   now
  ✗ tools-old-experiment               ✗ folder is gone                                             — ··········   41d
 
- ↑↓ move  ⏎ details  d remove  D remove idle  → sessions  / filter  s sort: activity  r refresh  ? help  q quit
+
+
+
+ ↑↓ move  ⏎ details  d remove  D remove idle  → sessions  t routines  / filter  s sort: activity  r refresh  ? help
 ```
 
 <details>
@@ -81,7 +86,7 @@ tiling window managers: resize the pane and the layout follows.
 <summary>The sessions list (<code>→</code>): <code>Enter</code> copies the command that resumes one</summary>
 
 ```text
- grove   15 worktrees  15 sessions  ◆ 2 waiting for you  ⠸ 4 working  ● 3 idle  Σ 27.2 GB  disk █████▌·· 312 GB free
+ grove   15 wt  15 sessions  7 rtn  ◆ 1 routine waiting  ◆ 2 waiting for you  ⠸ 4 working  ●3  Σ 27.2 GB  312 GB free
 
  shop  ~/Workspace/shop ───────────────────────────────────────────────────────────────────────────────── 7 sessions
  ⠸ ✻ claude   pipeline optimization · bug hunter scanning PR #123 (3 l…  order-pipeline                           now
@@ -105,7 +110,41 @@ tiling window managers: resize the pane and the layout follows.
 
  landing  ~/Workspace/landing ──────────────────────────────────────────────────────────────────────────── 1 session
  ○ ◈ opencode sketch the pricing page                                                                              4d
- ↑↓ move  ⏎ copy command  i details  ← worktrees  / filter  r refresh  ? help  q quit
+ ↑↓ move  ⏎ copy command  i details  ← worktrees  → routines  / filter  r refresh  ? help  q quit
+```
+
+</details>
+
+<details>
+<summary>The routines Claude Desktop runs on a schedule (<code>t</code>): the ones waiting for you first, what they ask, and when they run next</summary>
+
+```text
+ grove   15 wt  15 ses  7 routines  ◆ 1 routine waiting  ◆ 2 waiting for you  ⠸ 4 working  ●3  Σ 27.2 GB  312 GB free
+
+▍◆ Release notes                                            Thu 09:00  ╭ Release notes ─────────── ◆ waiting for you ╮
+ ⠸ nightly-bench                                            Thu 02:30  │ release-notes                               │
+ ✗ dependency-audit                                         Mon 08:00  │ Weekdays 09:00 — drafts the release notes   │
+ ! Weekly digest                                                21:46  │ from the merged PRs                         │
+ ✓ Standup summary                                          Thu 09:45  │ ~/Workspace/shop                            │
+ ○ inbox-triage                                             Thu 07:15  │                                             │
+ ‖ cleanup-branches                                                 —  │ SCHEDULE  0 9 * * 1-5                       │
+                                                                       │ weekdays 09:00  · next Thu 09:00 · in 11h   │
+                                                                       │ last due 09:00 · ran 09:00                  │
+                                                                       │                                             │
+                                                                       │ LAST RUN  50 min ago                        │
+                                                                       │ Release notes for v2.4                      │
+                                                                       │                                             │
+                                                                       │ IT ASKS                                     │
+                                                                       │ Publish the notes for v2.4 now, or wait for │
+                                                                       │ the last PR to merge?                       │
+                                                                       │                                             │
+                                                                       │                                             │
+                                                                       │                                             │
+                                                                       │ $ cd ~/Workspace/shop && claude --resume    │
+                                                                       │ a1b2c3d4-7d1c-4e2a-9b3f-5a6c7d8e9f01        │
+                                                                       │ ⏎ copies the command that resumes the last… │
+                                                                       ╰─────────────────────────────────────────────╯
+ ↑↓ move  ⏎ copy command  i details  ← sessions  / filter  r refresh  ? help  q quit
 ```
 
 </details>
@@ -189,6 +228,21 @@ largest.
   to paste in the terminal you want: `cd ~/code/app && claude --resume <id>`,
   `codex resume <id>` or `opencode --session <id>`, or
   `claude attach <id>` for a Claude Code background session still running.
+- **Claude Desktop's routines.** `t` (or `→` from the sessions) goes to the
+  routines Desktop runs on a schedule, the ones waiting for you first: what
+  the last run asks (the question Desktop shows on its card), whether it
+  failed, whether one did not run when it was due (Desktop runs them only
+  while it is open), the schedule in words (`weekdays 17:30`) and when it
+  runs next. The header counts the routines waiting for you from every list,
+  and a click on it opens them. `Enter` opens the last run in Claude Code,
+  to answer or approve it right there: in a new herdr tab named after the
+  routine, where herdr starts it as an agent (`herdr agent start --kind claude
+  -- --resume <id>`), or a new tmux window, whichever grove runs in, over SSH
+  too. Answered there, it stops waiting, though Desktop's summary still asks:
+  grove sees the conversation went on. `o` opens it in Claude Desktop instead
+  (`claude://code/continue?session=local_<id>`), and `c` copies
+  `cd <folder> && claude --resume <id>`, which `Enter` does outside herdr and
+  tmux.
 - **Removal in one step.** `d` asks once and removes: it stops whatever runs
   in the worktree (agent sessions, servers, shells), then runs
   `git worktree remove --force`, twice forced for a locked worktree, as git
@@ -228,20 +282,24 @@ grove --no-mouse       # leave the mouse to the terminal, to select text
 | --- | --- |
 | `↑` `↓` or `j` `k` | Move (also the mouse wheel and a click) |
 | `PgUp` `PgDn`, `g` `G` | Page, first, last |
-| `←` `→` or `h` `l` | Go to the worktrees or to the sessions (or click the other one on top) |
-| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one |
+| `←` `→` or `h` `l` | Go between the worktrees, the sessions and the routines (or click a tab on top) |
+| `1` `2` `3` | Go to the worktrees, the sessions or the routines |
+| `t` | Go to Claude Desktop's routines |
+| `Enter` | Worktrees: show or hide the details (full screen when the window is small). Sessions: copy the command that resumes the selected one. Routines: open the last run in Claude Code, in a new herdr tab or tmux window, to answer or approve it |
+| `o` | Routines: open the last run in Claude Desktop |
+| `c` | Routines: copy the command that resumes the last run in a terminal |
 | `i` | Show or hide the details |
 | `d` | Remove the worktree, stopping what runs in it |
 | `D` | Remove every idle worktree on the list |
-| `/` | Filter by name, branch, path, session name or prompt |
-| `s` | Sort the worktrees by activity, size, name or oldest |
+| `/` | Filter by name, branch, path, session name, prompt, or what a routine asks |
+| `s` | Worktrees: sort by activity, size, name or oldest. Sessions: group by project or by the folder each one works in |
 | `r` | Refresh now and measure the selected worktree again |
 | `R` | Measure every worktree again |
 | `?` | Help |
 | `q` or `Ctrl+C` | Quit |
 
-In a removal question, `Enter` removes and `Esc` cancels. Among the sessions,
-a click selects one and a second click copies its command.
+In a removal question, `Enter` removes and `Esc` cancels. Among the sessions
+and the routines, a click selects one and a second click copies its command.
 
 ### States
 
@@ -257,6 +315,16 @@ a click selects one and a second click copies its command.
 Among the sessions, `◆`, `⠸` and `●` say what the session that has the
 conversation open is doing, `○` is a closed one and `✗` one whose folder is
 gone, so its command cannot work.
+
+Among the routines, `◆` is one whose last run waits for you, `◇` one that
+asks something you have seen and not answered yet (opened in Desktop as it
+stopped or after, opened from grove, or open in a terminal now; it waits
+again when it asks something new), `⠸` one running now, `✗` one whose last
+run failed, `!` one that did not run when it was due, `✓` one that ran, `○`
+one that never ran and `‖` a paused one. The header counts only the `◆` ones.
+grove keeps the runs it opened in `grove/seen.json` under the system's
+application data (`~/Library/Application Support`, `%LOCALAPPDATA%`,
+`~/.local/state`).
 
 `±12` counts changed and untracked files, `↑3 ↓1` commits ahead and behind
 the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.
@@ -288,6 +356,20 @@ the upstream; `✻` is Claude Code, `❯` Codex and `◈` OpenCode.
   OpenCode one is taken to have the latest of the folder it runs in. The
   command is copied with the system's tool (`pbcopy`, `wl-copy`, `xclip`,
   `xsel`, `clip`), or through the terminal (OSC 52) over SSH or without one.
+- **Routines** come from Claude Desktop's own records, in its application
+  data, found anew on every look: `~/Library/Application Support/Claude` on
+  macOS; on Windows `%APPDATA%\Claude`, or, installed from the Microsoft
+  Store, `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`;
+  `~/.config/Claude` elsewhere; or the folder in `GROVE_DESKTOP_DIR`.
+  `claude-code-sessions/<account>/<organization>/scheduled-tasks.json` (and
+  `local-agent-mode-sessions/…` for agent mode, in the same format)
+  lists them with their cron schedule (in local time) and last run, and each
+  session Desktop opens is a `local_<id>.json` beside it. The latest one that
+  names a routine is its last run, and Desktop's summary of its last turn
+  (`postTurnSummary`) says whether it waits for you and what for; a run
+  archived in Desktop is taken as dealt with. When the Claude Code session
+  under the run is open, what it is doing comes first. Those files are read
+  again only when they change.
 - **Removing** stops every process working inside the worktree, helpers
   included: it asks them to quit, and kills the ones still there after three
   seconds. Each process is checked again right before, so a number taken by
